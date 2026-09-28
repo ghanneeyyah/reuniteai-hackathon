@@ -1099,10 +1099,10 @@ We welcome contributions! Please follow these steps:
 
 | Name | Role | Contact |
 |------|------|---------|
-| [Your Name] | Backend Developer | your.email@example.com |
-| [Teammate 2] | AI/ML Engineer | teammate2@example.com |
-| [Teammate 3] | Frontend Developer | teammate3@example.com |
-| [Teammate 4] | UI/UX Designer | teammate4@example.com |
+| Ganiyat Olaiwon | Backend Developer | olaiwonganiyat18@gmail.com |
+| Ameerah Salami | AI/ML Engineer | salamiameer663@gmail.com |
+| Khadijah Ahmed | Frontend Developer | akhadijah390@gmail.com |
+| Rodiyat Tijani | UI/UX Designer | moyosaderodiyat@gmail.com |
 
 ---
 
