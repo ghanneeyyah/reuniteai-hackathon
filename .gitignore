@@ -1,5 +1,9 @@
 # .gitignore
+# Environment variables
 .env
+.env.*
+!.env.example
+
 node_modules
 __pycache__
 *.pyc
