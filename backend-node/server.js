@@ -18,18 +18,25 @@ if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Import routes (will create these files next)
+// Import routes
 const missingPersonRoutes = require('./src/routes/missingPerson.routes');
 const sightingRoutes = require('./src/routes/sighting.routes');
 const matchRoutes = require('./src/routes/match.routes');
 const authRoutes = require('./src/routes/auth.routes');
 const adminRoutes = require('./src/routes/admin.routes');
+const mapRoutes = require('./src/routes/map.routes');
+
+const allowedOrigins = [
+    process.env.FRONTEND_URL,
+    'http://localhost:5173',
+    'http://localhost:3000'
+].filter(Boolean);
 
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
     cors: {
-        origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+        origin: allowedOrigins,
         credentials: true
     }
 });
@@ -45,9 +52,11 @@ const limiter = rateLimit({
 });
 
 // Middleware
-app.use(helmet());
+app.use(helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
 app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: allowedOrigins,
     credentials: true
 }));
 app.use(express.json());
@@ -55,7 +64,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/api/', limiter);
 
 // Serve static files (uploaded images)
-app.use('/uploads', express.static(path.join(__dirname, process.env.UPLOAD_DIR || 'uploads')));
+app.use('/uploads', express.static(uploadDir));
 
 // Make io accessible to routes
 app.set('io', io);
@@ -67,7 +76,7 @@ mongoose.connect(process.env.MONGODB_URI, {
 })
 .then(() => {
     console.log('✅ MongoDB connected successfully');
-    console.log(`📀 Database: ${process.env.MONGODB_URI}`);
+    console.log('📀 Database: MongoDB connection configured');
 })
 .catch(err => {
     console.error('❌ MongoDB connection error:', err.message);
@@ -77,7 +86,7 @@ mongoose.connect(process.env.MONGODB_URI, {
 // Socket.io connection
 io.on('connection', (socket) => {
     console.log('📡 New client connected:', socket.id);
-    
+
     socket.on('disconnect', () => {
         console.log('📡 Client disconnected:', socket.id);
     });
@@ -100,6 +109,7 @@ app.use('/api/missing-person', missingPersonRoutes);
 app.use('/api/sighting', sightingRoutes);
 app.use('/api/matches', matchRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/map', mapRoutes);
 
 // 404 handler
 app.use((req, res) => {
@@ -112,7 +122,7 @@ app.use((req, res) => {
 // Global error handling middleware
 app.use((err, req, res, next) => {
     console.error('❌ Error:', err.stack);
-    
+
     // Multer error handling
     if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(400).json({
@@ -120,7 +130,7 @@ app.use((err, req, res, next) => {
             message: 'File too large. Maximum size is 5MB.'
         });
     }
-    
+
     res.status(err.status || 500).json({
         success: false,
         message: err.message || 'Internal server error',

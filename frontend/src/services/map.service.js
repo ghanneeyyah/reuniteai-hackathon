@@ -3,18 +3,18 @@ import api from './api';
 
 const mapService = {
   // General Map Data
-  async getAll() {
-    const response = await api.get('/api/map/all');
+  async getAll(params = {}) {
+    const response = await api.get('/api/map/all', { params });
     return response.data;
   },
 
-  async getHeatmap() {
-    const response = await api.get('/api/map/heatmap');
+  async getHeatmap(days = 30) {
+    const response = await api.get('/api/map/heatmap', { params: { days } });
     return response.data;
   },
 
-  async getClusters() {
-    const response = await api.get('/api/map/clusters');
+  async getClusters(params = {}) {
+    const response = await api.get('/api/map/clusters', { params });
     return response.data;
   },
 
@@ -24,36 +24,36 @@ const mapService = {
   },
 
   // Sightings Map
-  async getSightings() {
-    const response = await api.get('/api/map/sightings');
+  async getSightings(params = {}) {
+    const response = await api.get('/api/map/sightings', { params });
     return response.data;
   },
 
-  async getSightingsNearby(latitude, longitude, radius = 50) {
+  async getSightingsNearby(lat, lng, radius = 50) {
     const params = new URLSearchParams();
-    params.append('latitude', latitude);
-    params.append('longitude', longitude);
+    params.append('lat', lat);
+    params.append('lng', lng);
     if (radius) params.append('radius', radius);
 
     const response = await api.get(`/api/map/sightings/nearby?${params.toString()}`);
     return response.data;
   },
 
-  async getSightingClusters() {
-    const response = await api.get('/api/map/sightings/clusters');
+  async getSightingClusters(params = {}) {
+    const response = await api.get('/api/map/sightings/clusters', { params });
     return response.data;
   },
 
   // Missing Persons Map
-  async getMissing() {
-    const response = await api.get('/api/map/missing');
+  async getMissing(params = {}) {
+    const response = await api.get('/api/map/missing', { params });
     return response.data;
   },
 
-  async getMissingNearby(latitude, longitude, radius = 50) {
+  async getMissingNearby(lat, lng, radius = 50) {
     const params = new URLSearchParams();
-    params.append('latitude', latitude);
-    params.append('longitude', longitude);
+    params.append('lat', lat);
+    params.append('lng', lng);
     if (radius) params.append('radius', radius);
 
     const response = await api.get(`/api/map/missing/nearby?${params.toString()}`);
@@ -61,7 +61,13 @@ const mapService = {
   },
 
   async updateMissingCoordinates(id, coordinates) {
-    const response = await api.put(`/api/map/missing/${id}/coordinates`, coordinates);
+    const payload = {
+      lat: coordinates.lat ?? coordinates.latitude,
+      lng: coordinates.lng ?? coordinates.longitude,
+      accuracy: coordinates.accuracy,
+      source: coordinates.source,
+    };
+    const response = await api.put(`/api/map/missing/${id}/coordinates`, payload);
     return response.data;
   },
 
@@ -76,10 +82,10 @@ const mapService = {
     return response.data;
   },
 
-  async reverseGeocode(latitude, longitude) {
+  async reverseGeocode(lat, lng) {
     const response = await api.post('/api/map/admin/reverse-geocode', {
-      latitude,
-      longitude,
+      lat,
+      lng,
     });
     return response.data;
   },

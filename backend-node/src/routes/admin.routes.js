@@ -1,16 +1,13 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const { protect, adminOnly } = require('../middleware/auth.middleware');
 const User = require('../models/User.model');
 const MissingPerson = require('../models/MissingPerson.model');
 const Sighting = require('../models/Sighting.model');
 const Match = require('../models/Match.model');
+const { aiService } = require('../services/ai.service');
 
-/**
- * @route   GET /api/admin/dashboard/stats
- * @desc    Get admin dashboard statistics
- * @access  Private (Admin only)
- */
 router.get('/dashboard/stats', protect, adminOnly, async (req, res) => {
     try {
         const [
@@ -37,26 +34,28 @@ router.get('/dashboard/stats', protect, adminOnly, async (req, res) => {
                 .populate('sightingId', 'description')
         ]);
 
-        // Get user registration trend (last 7 days)
         const sevenDaysAgo = new Date();
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-        
+
         const userTrend = await User.aggregate([
             { $match: { createdAt: { $gte: sevenDaysAgo } } },
-            { $group: {
-                _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-                count: { $sum: 1 }
-            }},
+            {
+                $group: {
+                    _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+                    count: { $sum: 1 }
+                }
+            },
             { $sort: { _id: 1 } }
         ]);
 
-        // Get sighting trend (last 7 days)
         const sightingTrend = await Sighting.aggregate([
             { $match: { createdAt: { $gte: sevenDaysAgo } } },
-            { $group: {
-                _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-                count: { $sum: 1 }
-            }},
+            {
+                $group: {
+                    _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+                    count: { $sum: 1 }
+                }
+            },
             { $sort: { _id: 1 } }
         ]);
 
@@ -90,21 +89,16 @@ router.get('/dashboard/stats', protect, adminOnly, async (req, res) => {
     }
 });
 
-/**
- * @route   GET /api/admin/users
- * @desc    Get all users with filters
- * @access  Private (Admin only)
- */
 router.get('/users', protect, adminOnly, async (req, res) => {
     try {
         const { role, isVerified, page = 1, limit = 20 } = req.query;
-        
+
         const filter = {};
         if (role) filter.role = role;
         if (isVerified !== undefined) filter.isVerified = isVerified === 'true';
-        
+
         const skip = (parseInt(page) - 1) * parseInt(limit);
-        
+
         const [users, total] = await Promise.all([
             User.find(filter)
                 .select('-password')
@@ -113,7 +107,7 @@ router.get('/users', protect, adminOnly, async (req, res) => {
                 .sort({ createdAt: -1 }),
             User.countDocuments(filter)
         ]);
-        
+
         res.json({
             success: true,
             data: users,
@@ -133,23 +127,18 @@ router.get('/users', protect, adminOnly, async (req, res) => {
     }
 });
 
-/**
- * @route   PUT /api/admin/users/:userId/role
- * @desc    Update user role
- * @access  Private (Admin only)
- */
 router.put('/users/:userId/role', protect, adminOnly, async (req, res) => {
     try {
         const { role } = req.body;
         const { userId } = req.params;
-        
+
         if (!['citizen', 'family', 'admin'].includes(role)) {
             return res.status(400).json({
                 success: false,
                 message: 'Invalid role. Must be citizen, family, or admin'
             });
         }
-        
+
         const user = await User.findById(userId);
         if (!user) {
             return res.status(404).json({
@@ -157,8 +146,7 @@ router.put('/users/:userId/role', protect, adminOnly, async (req, res) => {
                 message: 'User not found'
             });
         }
-        
-        // Prevent changing own role if you're the only admin
+
         if (userId === req.user._id.toString() && role !== 'admin') {
             const adminCount = await User.countDocuments({ role: 'admin' });
             if (adminCount === 1) {
@@ -168,10 +156,10 @@ router.put('/users/:userId/role', protect, adminOnly, async (req, res) => {
                 });
             }
         }
-        
+
         user.role = role;
         await user.save();
-        
+
         res.json({
             success: true,
             data: { id: user._id, name: user.name, email: user.email, role: user.role },
@@ -186,15 +174,10 @@ router.put('/users/:userId/role', protect, adminOnly, async (req, res) => {
     }
 });
 
-/**
- * @route   PUT /api/admin/users/:userId/verify
- * @desc    Verify a user account
- * @access  Private (Admin only)
- */
 router.put('/users/:userId/verify', protect, adminOnly, async (req, res) => {
     try {
         const { userId } = req.params;
-        
+
         const user = await User.findById(userId);
         if (!user) {
             return res.status(404).json({
@@ -202,10 +185,10 @@ router.put('/users/:userId/verify', protect, adminOnly, async (req, res) => {
                 message: 'User not found'
             });
         }
-        
+
         user.isVerified = true;
         await user.save();
-        
+
         res.json({
             success: true,
             message: 'User verified successfully'
@@ -219,23 +202,17 @@ router.put('/users/:userId/verify', protect, adminOnly, async (req, res) => {
     }
 });
 
-/**
- * @route   DELETE /api/admin/users/:userId
- * @desc    Delete a user (admin only)
- * @access  Private (Admin only)
- */
 router.delete('/users/:userId', protect, adminOnly, async (req, res) => {
     try {
         const { userId } = req.params;
-        
-        // Prevent deleting yourself
+
         if (userId === req.user._id.toString()) {
             return res.status(400).json({
                 success: false,
                 message: 'Cannot delete your own account'
             });
         }
-        
+
         const user = await User.findById(userId);
         if (!user) {
             return res.status(404).json({
@@ -243,8 +220,7 @@ router.delete('/users/:userId', protect, adminOnly, async (req, res) => {
                 message: 'User not found'
             });
         }
-        
-        // Check if last admin
+
         if (user.role === 'admin') {
             const adminCount = await User.countDocuments({ role: 'admin' });
             if (adminCount === 1) {
@@ -254,9 +230,9 @@ router.delete('/users/:userId', protect, adminOnly, async (req, res) => {
                 });
             }
         }
-        
+
         await user.deleteOne();
-        
+
         res.json({
             success: true,
             message: 'User deleted successfully'
@@ -270,28 +246,22 @@ router.delete('/users/:userId', protect, adminOnly, async (req, res) => {
     }
 });
 
-/**
- * @route   GET /api/admin/system/health
- * @desc    Get system health status
- * @access  Private (Admin only)
- */
 router.get('/system/health', protect, adminOnly, async (req, res) => {
     try {
-        const mongoose = require('mongoose');
-        
         const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
-        
-        // Get database sizes
-        const dbStats = await mongoose.connection.db.stats();
-        
-        // Get collection counts
-        const collections = {
-            users: await User.estimatedDocumentCount(),
-            missingPersons: await MissingPerson.estimatedDocumentCount(),
-            sightings: await Sighting.estimatedDocumentCount(),
-            matches: await Match.estimatedDocumentCount()
-        };
-        
+        const dbStats = dbStatus === 'connected' ? await mongoose.connection.db.stats() : { dataSize: 0 };
+
+        const [users, missingPersons, sightings, matches, aiHealth] = await Promise.all([
+            User.estimatedDocumentCount(),
+            MissingPerson.estimatedDocumentCount(),
+            Sighting.estimatedDocumentCount(),
+            Match.estimatedDocumentCount(),
+            aiService.getHealthDetails()
+        ]);
+
+        const mem = process.memoryUsage();
+        const io = req.app.get('io');
+
         res.json({
             success: true,
             data: {
@@ -301,10 +271,22 @@ router.get('/system/health', protect, adminOnly, async (req, res) => {
                     status: dbStatus,
                     name: mongoose.connection.name,
                     sizeMB: (dbStats.dataSize / 1024 / 1024).toFixed(2),
-                    collections: collections
+                    collections: {
+                        users,
+                        missingPersons,
+                        sightings,
+                        matches
+                    }
                 },
+                ai: aiHealth,
                 uptime: process.uptime(),
-                memory: process.memoryUsage(),
+                connections: io?.engine?.clientsCount ?? 0,
+                memory: {
+                    used: Math.round(mem.heapUsed / 1024 / 1024),
+                    total: Math.round(mem.heapTotal / 1024 / 1024),
+                    rss: Math.round(mem.rss / 1024 / 1024),
+                    raw: mem
+                },
                 nodeVersion: process.version
             }
         });
@@ -317,24 +299,17 @@ router.get('/system/health', protect, adminOnly, async (req, res) => {
     }
 });
 
-/**
- * @route   GET /api/admin/activity/logs
- * @desc    Get recent activity logs (simplified - would need actual logging system)
- * @access  Private (Admin only)
- */
 router.get('/activity/logs', protect, adminOnly, async (req, res) => {
     try {
         const { limit = 50 } = req.query;
-        
-        // Get recent activities from various collections
+
         const [recentMissing, recentSightings, recentMatches, recentUsers] = await Promise.all([
             MissingPerson.find().sort({ createdAt: -1 }).limit(parseInt(limit)).populate('createdBy', 'name'),
             Sighting.find().sort({ createdAt: -1 }).limit(parseInt(limit)).populate('reportedBy', 'name'),
             Match.find().sort({ createdAt: -1 }).limit(parseInt(limit)).populate('verifiedBy', 'name'),
             User.find().sort({ createdAt: -1 }).limit(parseInt(limit)).select('name email role createdAt')
         ]);
-        
-        // Combine and format activities
+
         const activities = [
             ...recentMissing.map(m => ({
                 type: 'missing_person_created',
@@ -365,10 +340,9 @@ router.get('/activity/logs', protect, adminOnly, async (req, res) => {
                 userName: u.name
             }))
         ];
-        
-        // Sort by timestamp descending
+
         activities.sort((a, b) => b.timestamp - a.timestamp);
-        
+
         res.json({
             success: true,
             data: activities.slice(0, parseInt(limit)),
@@ -383,34 +357,29 @@ router.get('/activity/logs', protect, adminOnly, async (req, res) => {
     }
 });
 
-/**
- * @route   POST /api/admin/notification/broadcast
- * @desc    Send broadcast notification (placeholder for actual notification system)
- * @access  Private (Admin only)
- */
 router.post('/notification/broadcast', protect, adminOnly, async (req, res) => {
     try {
         const { title, message, userRole } = req.body;
-        
+
         if (!title || !message) {
             return res.status(400).json({
                 success: false,
                 message: 'Title and message are required'
             });
         }
-        
-        // This would integrate with actual notification service
-        // For now, just log and return success
+
         console.log(`Broadcast notification - Title: ${title}, Message: ${message}, Target: ${userRole || 'all'}`);
-        
+
         const io = req.app.get('io');
-        io.emit('broadcast-notification', {
-            title,
-            message,
-            timestamp: new Date(),
-            targetRole: userRole || 'all'
-        });
-        
+        if (io) {
+            io.emit('broadcast-notification', {
+                title,
+                message,
+                timestamp: new Date(),
+                targetRole: userRole || 'all'
+            });
+        }
+
         res.json({
             success: true,
             message: 'Notification broadcasted successfully'

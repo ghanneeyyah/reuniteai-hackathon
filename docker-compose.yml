@@ -1,32 +1,31 @@
 services:
+  ai-service:
+    build: ./ai-service
+    ports:
+      - "8000:8000"
+    volumes:
+      - ai_models:/root/.deepface
+
+  backend:
+    build: ./backend
+    ports:
+      - "5000:5000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - AI_SERVICE_URL=http://ai-service:8000
+      - FRONTEND_URL=http://localhost:5173
+    volumes:
+      - ./backend/uploads:/app/uploads
+    depends_on:
+      - ai-service
+
   frontend:
     build: ./frontend
     ports:
-      - "80:80"
+      - "5173:80"
     depends_on:
-      - backend-node
-      - ai-service
-    networks:
-      - app-network
+      - backend
 
-  backend-node:
-    build: ./backend-node
-    env_file: .env
-    ports:
-      - "5000:5000"
-    depends_on:
-      - ai-service
-    networks:
-      - app-network
-
-  ai-service:
-    build: ./ai-service
-    env_file: .env
-    ports:
-      - "8000:8000"
-    networks:
-      - app-network
-
-networks:
-  app-network:
-    driver: bridge
+volumes:
+  ai_models:

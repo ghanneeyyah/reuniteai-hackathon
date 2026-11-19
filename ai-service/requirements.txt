@@ -1,11 +1,12 @@
+
 fastapi
 uvicorn
 python-dotenv
 spacy
 deepface==0.0.79
 python-multipart==0.0.6
-numpy
-pandas
+numpy==1.24.3
+pandas<3
 tensorflow==2.13.0
 pillow>=10.0,<11
 opencv-python-headless==4.8.1.78

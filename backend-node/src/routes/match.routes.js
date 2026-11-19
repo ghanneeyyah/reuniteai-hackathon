@@ -45,6 +45,8 @@ router.get('/sighting/:sightingId', protect, adminOnly, matchController.getMatch
  * @desc    Get single match by ID
  * @access  Private (Admin only)
  */
+router.post('/run-matching', protect, adminOnly, matchController.runBatchMatching);
+
 router.get('/:id', protect, adminOnly, matchController.getMatchById);
 
 /**

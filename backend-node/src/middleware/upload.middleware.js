@@ -3,6 +3,9 @@ const path = require('path');
 const fs = require('fs');
 
 const uploadDir = process.env.UPLOAD_DIR || 'uploads';
+const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 5 * 1024 * 1024;
+const MAX_FILE_SIZE_MB = Math.round(MAX_FILE_SIZE / (1024 * 1024));
+
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
 }
@@ -26,7 +29,8 @@ const storage = multer.diskStorage({
     filename: (req, file, cb) => {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
         const extension = path.extname(file.originalname).toLowerCase();
-        const sanitizedName = file.originalname
+        const baseName = path.basename(file.originalname, path.extname(file.originalname));
+        const sanitizedName = baseName
             .replace(/\s+/g, '_')
             .replace(/[^a-zA-Z0-9._-]/g, '')
             .substring(0, 50);
@@ -59,7 +63,7 @@ const documentFileFilter = (req, file, cb) => {
 const uploadImage = multer({
     storage: storage,
     limits: {
-        fileSize: parseInt(process.env.MAX_FILE_SIZE) || 5 * 1024 * 1024,
+        fileSize: MAX_FILE_SIZE,
         files: 1
     },
     fileFilter: imageFileFilter
@@ -68,7 +72,7 @@ const uploadImage = multer({
 const uploadMultipleImages = multer({
     storage: storage,
     limits: {
-        fileSize: parseInt(process.env.MAX_FILE_SIZE) || 5 * 1024 * 1024,
+        fileSize: MAX_FILE_SIZE,
         files: 10
     },
     fileFilter: imageFileFilter
@@ -87,7 +91,7 @@ const uploadSinglePhoto = (req, res, next) => {
     const upload = multer({
         storage: storage,
         limits: {
-            fileSize: parseInt(process.env.MAX_FILE_SIZE) || 5 * 1024 * 1024
+            fileSize: MAX_FILE_SIZE
         },
         fileFilter: imageFileFilter
     }).single('photo');
@@ -97,7 +101,7 @@ const uploadSinglePhoto = (req, res, next) => {
             if (err.code === 'LIMIT_FILE_SIZE') {
                 return res.status(400).json({
                     success: false,
-                    message: `File too large. Maximum size is ${parseInt(process.env.MAX_FILE_SIZE) / (1024 * 1024)}MB`
+                    message: `File too large. Maximum size is ${MAX_FILE_SIZE_MB}MB`
                 });
             }
             return res.status(400).json({ success: false, message: err.message });
@@ -112,7 +116,7 @@ const uploadSightingImage = (req, res, next) => {
     const upload = multer({
         storage: storage,
         limits: {
-            fileSize: parseInt(process.env.MAX_FILE_SIZE) || 5 * 1024 * 1024
+            fileSize: MAX_FILE_SIZE
         },
         fileFilter: imageFileFilter
     }).single('image');
@@ -122,7 +126,7 @@ const uploadSightingImage = (req, res, next) => {
             if (err.code === 'LIMIT_FILE_SIZE') {
                 return res.status(400).json({
                     success: false,
-                    message: `File too large. Maximum size is ${parseInt(process.env.MAX_FILE_SIZE) / (1024 * 1024)}MB`
+                    message: `File too large. Maximum size is ${MAX_FILE_SIZE_MB}MB`
                 });
             }
             return res.status(400).json({ success: false, message: err.message });

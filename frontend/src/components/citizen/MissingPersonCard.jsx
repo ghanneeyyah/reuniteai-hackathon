@@ -1,11 +1,17 @@
 // src/components/citizen/MissingPersonCard.jsx
 import { Link } from 'react-router-dom';
 import { MapPin, Clock } from 'lucide-react';
-import { formatDate, timeAgo, getStatusColor, getImageUrl } from '../../utils/helpers';
+import { timeAgo, getStatusColor, getImageUrl } from '../../utils/helpers';
 
 export default function MissingPersonCard({ person }) {
-  const fullName = person.name || 'Unknown';
-  const photoUrl = getImageUrl(person.photos?.[0] || person.photo);
+  const fullName = person.fullName || person.name || 'Unknown';
+  const primaryPhoto =
+    person.photos?.find((p) => p?.isPrimary) || person.photos?.[0];
+  const rawPhotoPath =
+    typeof primaryPhoto === 'string'
+      ? primaryPhoto
+      : primaryPhoto?.url || person.photo;
+  const photoUrl = getImageUrl(rawPhotoPath);
 
   return (
     <Link
@@ -33,7 +39,9 @@ export default function MissingPersonCard({ person }) {
 
       <div className="flex items-center gap-1 mt-2 text-xs text-gray-500">
         <MapPin className="w-3 h-3" />
-        <span className="truncate">{person.lastKnownLocation || 'Unknown'}</span>
+        <span className="truncate">
+          {person.lastSeenLocation || person.lastKnownLocation || 'Unknown'}
+        </span>
       </div>
 
       <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">

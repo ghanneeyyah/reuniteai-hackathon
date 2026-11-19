@@ -1,7 +1,20 @@
+const path = require('path');
+const fs = require('fs');
 const Match = require('../models/Match.model');
 const MissingPerson = require('../models/MissingPerson.model');
 const Sighting = require('../models/Sighting.model');
 const notificationService = require('../services/notification.service');
+const { aiService } = require('../services/ai.service');
+
+const resolveUploadPath = (relativeUrl) => {
+    if (!relativeUrl) return null;
+    const cleaned = relativeUrl.replace(/^\/+/, '');
+    const candidates = [
+        path.join(process.cwd(), cleaned),
+        path.join(__dirname, '..', '..', cleaned)
+    ];
+    return candidates.find((p) => fs.existsSync(p)) || null;
+};
 
 /**
  * Get all matches with filters
@@ -9,17 +22,17 @@ const notificationService = require('../services/notification.service');
  */
 const getMatches = async (req, res) => {
     try {
-        const { 
-            status, 
+        const {
+            status,
             confidence,
             minScore,
             maxScore,
-            page = 1, 
+            page = 1,
             limit = 20,
             sortBy = 'createdAt',
             sortOrder = 'desc'
         } = req.query;
-        
+
         const filter = {};
         if (status) filter.status = status;
         if (confidence) filter.confidence = confidence;
@@ -28,10 +41,10 @@ const getMatches = async (req, res) => {
             if (minScore) filter.similarityScore.$gte = parseFloat(minScore);
             if (maxScore) filter.similarityScore.$lte = parseFloat(maxScore);
         }
-        
+
         const skip = (parseInt(page) - 1) * parseInt(limit);
         const sortDirection = sortOrder === 'desc' ? -1 : 1;
-        
+
         const [matches, total] = await Promise.all([
             Match.find(filter)
                 .skip(skip)
@@ -43,7 +56,7 @@ const getMatches = async (req, res) => {
                 .populate('investigationNotes.createdBy', 'name'),
             Match.countDocuments(filter)
         ]);
-        
+
         res.json({
             success: true,
             data: matches,
@@ -64,6 +77,132 @@ const getMatches = async (req, res) => {
 };
 
 /**
+ * Backfill missing face embeddings and run AI matching across all active records
+ * POST /api/matches/run-matching
+ */
+const runBatchMatching = async (req, res) => {
+    try {
+        const aiHealthy = await aiService.healthCheck();
+        if (!aiHealthy) {
+            return res.status(503).json({
+                success: false,
+                message: 'AI service is offline. Start the Python FastAPI service on port 8000 first.'
+            });
+        }
+
+        let embeddingsGenerated = 0;
+        let matchesCreated = 0;
+
+        // 1. Backfill embeddings for missing persons without one
+        const missingWithoutEmb = await MissingPerson.find({
+            status: 'missing',
+            $or: [{ faceEmbedding: null }, { faceEmbedding: { $exists: false } }, { faceEmbedding: { $size: 0 } }]
+        });
+
+        for (const mp of missingWithoutEmb) {
+            const photoUrl = mp.photos?.find((p) => p.isPrimary)?.url || mp.photos?.[0]?.url;
+            const diskPath = resolveUploadPath(photoUrl);
+            if (!diskPath) continue;
+
+            try {
+                const embRes = await aiService.generateFaceEmbedding(diskPath);
+                if (embRes.success && embRes.embedding) {
+                    mp.faceEmbedding = embRes.embedding;
+                    await mp.save();
+                    embeddingsGenerated++;
+                }
+            } catch (err) {
+                console.warn(`Embedding failed for missing person ${mp._id}:`, err.message);
+            }
+        }
+
+        // 2. Backfill embeddings for sightings without one
+        const sightingsWithoutEmb = await Sighting.find({
+            $or: [{ faceEmbedding: null }, { faceEmbedding: { $exists: false } }, { faceEmbedding: { $size: 0 } }],
+            'image.url': { $ne: null }
+        });
+
+        for (const s of sightingsWithoutEmb) {
+            const diskPath = resolveUploadPath(s.image?.url);
+            if (!diskPath) continue;
+
+            try {
+                const embRes = await aiService.generateFaceEmbedding(diskPath);
+                if (embRes.success && embRes.embedding) {
+                    s.faceEmbedding = embRes.embedding;
+                    s.aiProcessed = true;
+                    s.aiProcessedAt = new Date();
+                    await s.save();
+                    embeddingsGenerated++;
+                }
+            } catch (err) {
+                console.warn(`Embedding failed for sighting ${s._id}:`, err.message);
+            }
+        }
+
+        // 3. Match all sightings with embeddings against all missing persons with embeddings
+        const [missingPersons, sightings] = await Promise.all([
+            MissingPerson.find({ status: 'missing', faceEmbedding: { $exists: true, $ne: null } })
+                .select('_id fullName age gender faceEmbedding lastSeenLocation'),
+            Sighting.find({ faceEmbedding: { $exists: true, $ne: null } })
+                .select('_id faceEmbedding status')
+        ]);
+
+        const candidates = missingPersons
+            .filter((mp) => Array.isArray(mp.faceEmbedding) && mp.faceEmbedding.length > 0)
+            .map((mp) => ({
+                id: mp._id.toString(),
+                embedding: mp.faceEmbedding,
+                name: mp.fullName
+            }));
+
+        if (candidates.length > 0) {
+            for (const sighting of sightings) {
+                if (!Array.isArray(sighting.faceEmbedding) || sighting.faceEmbedding.length === 0) continue;
+
+                const matchResult = await aiService.findBestMatch(sighting.faceEmbedding, candidates);
+                if (matchResult.success && matchResult.matches?.length > 0) {
+                    for (const match of matchResult.matches.slice(0, 5)) {
+                        const exists = await Match.findOne({
+                            missingPersonId: match.id,
+                            sightingId: sighting._id
+                        });
+                        if (!exists) {
+                            const confidence = match.score >= 85 ? 'high' : (match.score >= 65 ? 'medium' : 'low');
+                            await Match.create({
+                                missingPersonId: match.id,
+                                sightingId: sighting._id,
+                                similarityScore: match.score,
+                                confidence,
+                                status: 'pending'
+                            });
+                            matchesCreated++;
+                        }
+                    }
+                }
+            }
+        }
+
+        res.json({
+            success: true,
+            data: {
+                embeddingsGenerated,
+                matchesCreated,
+                missingPersonsScanned: candidates.length,
+                sightingsScanned: sightings.length
+            },
+            message: `AI scan complete: ${embeddingsGenerated} embeddings generated, ${matchesCreated} new match(es) created.`
+        });
+    } catch (error) {
+        console.error('Error running batch matching:', error);
+        res.status(500).json({
+            success: false,
+            message: error.message || 'Failed to run AI matching'
+        });
+    }
+};
+
+/**
  * Get match statistics
  * GET /api/matches/stats/overview
  */
@@ -75,41 +214,40 @@ const getMatchStats = async (req, res) => {
             Match.countDocuments({ status: 'rejected' }),
             Match.countDocuments({ status: 'investigating' }),
             Match.countDocuments({ status: 'resolved' }),
-            Match.countDocuments({ confidence: 'high', similarityScore: { $gte: 85 } }),
-            Match.countDocuments({ confidence: 'medium', similarityScore: { $gte: 65, $lt: 85 } }),
-            Match.countDocuments({ confidence: 'low', similarityScore: { $lt: 65 } })
+            Match.countDocuments({ similarityScore: { $gte: 85 } }),
+            Match.countDocuments({ similarityScore: { $gte: 65, $lt: 85 } }),
+            Match.countDocuments({ similarityScore: { $lt: 65 } })
         ]);
-        
-        // Get average match score
+
         const avgScoreResult = await Match.aggregate([
             { $group: { _id: null, averageScore: { $avg: '$similarityScore' } } }
         ]);
         const averageScore = avgScoreResult[0]?.averageScore || 0;
-        
-        // Get recent high confidence matches
-        const recentHighConfidence = await Match.find({ 
-            confidence: 'high', 
-            status: 'pending' 
+
+        const recentHighConfidence = await Match.find({
+            similarityScore: { $gte: 85 },
+            status: 'pending'
         })
             .sort({ similarityScore: -1, createdAt: -1 })
             .limit(10)
             .populate('missingPersonId', 'fullName age gender')
             .populate('sightingId', 'description location sightingTime');
-        
-        // Get matches by day (last 7 days)
+
         const sevenDaysAgo = new Date();
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-        
+
         const matchesByDay = await Match.aggregate([
             { $match: { createdAt: { $gte: sevenDaysAgo } } },
-            { $group: {
-                _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-                count: { $sum: 1 },
-                avgScore: { $avg: '$similarityScore' }
-            }},
+            {
+                $group: {
+                    _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+                    count: { $sum: 1 },
+                    avgScore: { $avg: '$similarityScore' }
+                }
+            },
             { $sort: { _id: 1 } }
         ]);
-        
+
         res.json({
             success: true,
             data: {
@@ -147,17 +285,16 @@ const getMatchStats = async (req, res) => {
 const getHighConfidenceMatches = async (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 20;
-        
-        const matches = await Match.find({ 
-            status: 'pending', 
-            confidence: 'high',
+
+        const matches = await Match.find({
+            status: 'pending',
             similarityScore: { $gte: 85 }
         })
             .sort({ similarityScore: -1, createdAt: 1 })
             .limit(limit)
             .populate('missingPersonId', 'fullName age gender photos lastSeenLocation status')
             .populate('sightingId', 'description location sightingTime image reportedBy');
-        
+
         res.json({
             success: true,
             data: matches,
@@ -179,8 +316,7 @@ const getHighConfidenceMatches = async (req, res) => {
 const getMatchesByMissingPerson = async (req, res) => {
     try {
         const { missingPersonId } = req.params;
-        
-        // Check if user is authorized (admin or family member who created the missing person report)
+
         const missingPerson = await MissingPerson.findById(missingPersonId);
         if (!missingPerson) {
             return res.status(404).json({
@@ -188,20 +324,19 @@ const getMatchesByMissingPerson = async (req, res) => {
                 message: 'Missing person not found'
             });
         }
-        
-        // Authorization check
+
         if (req.user.role !== 'admin' && missingPerson.createdBy.toString() !== req.user._id.toString()) {
             return res.status(403).json({
                 success: false,
                 message: 'You are not authorized to view matches for this missing person'
             });
         }
-        
+
         const matches = await Match.find({ missingPersonId })
             .sort({ similarityScore: -1, createdAt: -1 })
             .populate('sightingId', 'description location sightingTime image status')
             .populate('verifiedBy', 'name email');
-        
+
         res.json({
             success: true,
             data: matches,
@@ -227,12 +362,12 @@ const getMatchesByMissingPerson = async (req, res) => {
 const getMatchesBySighting = async (req, res) => {
     try {
         const { sightingId } = req.params;
-        
+
         const matches = await Match.find({ sightingId })
             .sort({ similarityScore: -1 })
             .populate('missingPersonId', 'fullName age gender photos status lastSeenLocation')
             .populate('verifiedBy', 'name email');
-        
+
         res.json({
             success: true,
             data: matches,
@@ -258,14 +393,14 @@ const getMatchById = async (req, res) => {
             .populate('sightingId', 'description location sightingTime image status reportedBy witnessInfo')
             .populate('verifiedBy', 'name email')
             .populate('investigationNotes.createdBy', 'name email');
-        
+
         if (!match) {
             return res.status(404).json({
                 success: false,
                 message: 'Match not found'
             });
         }
-        
+
         res.json({
             success: true,
             data: match
@@ -287,35 +422,31 @@ const verifyMatch = async (req, res) => {
     try {
         const { notes } = req.body;
         const match = await Match.findById(req.params.id);
-        
+
         if (!match) {
             return res.status(404).json({
                 success: false,
                 message: 'Match not found'
             });
         }
-        
+
         await match.verify(req.user._id, notes);
-        
-        // Update sighting status if needed
+
         await Sighting.findByIdAndUpdate(match.sightingId, {
             status: 'matched',
             reviewedBy: req.user._id,
             reviewedAt: new Date()
         });
-        
-        // Emit socket event
-        const io = req.app.get('io');
-        io.emit('match-verified', {
-            matchId: match._id,
-            missingPersonId: match.missingPersonId,
-            verifiedBy: req.user.name
-        });
 
-        // Notify the family/contact now that a human has verified the match.
-        // Failures here are logged but never fail the request — the match
-        // itself is already verified and shouldn't be rolled back over a
-        // notification hiccup.
+        const io = req.app.get('io');
+        if (io) {
+            io.emit('match-verified', {
+                matchId: match._id,
+                missingPersonId: match.missingPersonId,
+                verifiedBy: req.user.name
+            });
+        }
+
         let notificationResult = null;
         try {
             const missingPerson = await MissingPerson.findById(match.missingPersonId);
@@ -328,7 +459,7 @@ const verifyMatch = async (req, res) => {
         } catch (notifyError) {
             console.error('Error notifying family of verified match:', notifyError.message);
         }
-        
+
         res.json({
             success: true,
             data: match,
@@ -352,16 +483,16 @@ const rejectMatch = async (req, res) => {
     try {
         const { reason } = req.body;
         const match = await Match.findById(req.params.id);
-        
+
         if (!match) {
             return res.status(404).json({
                 success: false,
                 message: 'Match not found'
             });
         }
-        
+
         await match.reject(req.user._id, reason);
-        
+
         res.json({
             success: true,
             data: match,
@@ -384,16 +515,16 @@ const startInvestigation = async (req, res) => {
     try {
         const { notes } = req.body;
         const match = await Match.findById(req.params.id);
-        
+
         if (!match) {
             return res.status(404).json({
                 success: false,
                 message: 'Match not found'
             });
         }
-        
+
         await match.startInvestigation(req.user._id, notes);
-        
+
         res.json({
             success: true,
             data: match,
@@ -415,25 +546,25 @@ const startInvestigation = async (req, res) => {
 const addInvestigationNote = async (req, res) => {
     try {
         const { note } = req.body;
-        
+
         if (!note || note.trim() === '') {
             return res.status(400).json({
                 success: false,
                 message: 'Note is required'
             });
         }
-        
+
         const match = await Match.findById(req.params.id);
-        
+
         if (!match) {
             return res.status(404).json({
                 success: false,
                 message: 'Match not found'
             });
         }
-        
+
         await match.addInvestigationNote(req.user._id, note);
-        
+
         res.json({
             success: true,
             data: match,
@@ -456,17 +587,16 @@ const resolveMatch = async (req, res) => {
     try {
         const { resolutionNotes } = req.body;
         const match = await Match.findById(req.params.id);
-        
+
         if (!match) {
             return res.status(404).json({
                 success: false,
                 message: 'Match not found'
             });
         }
-        
+
         await match.resolve(req.user._id, resolutionNotes);
-        
-        // If resolved as verified, update missing person status to found
+
         if (match.status === 'verified') {
             await MissingPerson.findByIdAndUpdate(match.missingPersonId, {
                 status: 'found',
@@ -474,7 +604,7 @@ const resolveMatch = async (req, res) => {
                 foundNotes: resolutionNotes
             });
         }
-        
+
         res.json({
             success: true,
             data: match,
@@ -496,16 +626,16 @@ const resolveMatch = async (req, res) => {
 const deleteMatch = async (req, res) => {
     try {
         const match = await Match.findById(req.params.id);
-        
+
         if (!match) {
             return res.status(404).json({
                 success: false,
                 message: 'Match not found'
             });
         }
-        
+
         await match.deleteOne();
-        
+
         res.json({
             success: true,
             message: 'Match deleted successfully'
@@ -521,6 +651,7 @@ const deleteMatch = async (req, res) => {
 
 module.exports = {
     getMatches,
+    runBatchMatching,
     getMatchStats,
     getHighConfidenceMatches,
     getMatchesByMissingPerson,

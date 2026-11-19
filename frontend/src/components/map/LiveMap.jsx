@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState, useContext, useCallback } from 'react';
+import { useEffect, useRef, useState, useContext } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, CircleMarker, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { SocketContext } from '../../context/SocketContext';
-import { formatDate, timeAgo, getImageUrl } from '../../utils/helpers';
+import { timeAgo, getImageUrl } from '../../utils/helpers';
 import 'leaflet/dist/leaflet.css';
 
-// Fix default marker icon broken by webpack
+// Fix default marker icon broken by bundler
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
@@ -61,6 +61,36 @@ const newSightingIcon = L.divIcon({
   popupAnchor: [0, -20],
 });
 
+const toValidLatLng = (lat, lng) => {
+  if (lat == null || lng == null || lat === '' || lng === '') return null;
+  const numLat = Number(lat);
+  const numLng = Number(lng);
+  if (Number.isNaN(numLat) || Number.isNaN(numLng)) return null;
+  return [numLat, numLng];
+};
+
+const getSightingCoords = (sighting) => {
+  if (!sighting) return null;
+  const flat = toValidLatLng(sighting.lat, sighting.lng);
+  if (flat) return flat;
+  const loc = sighting.location;
+  if (!loc) return null;
+  const lat = loc.lat ?? loc.latitude ?? loc.geoJSON?.coordinates?.[1] ?? loc.coordinates?.[1];
+  const lng = loc.lng ?? loc.longitude ?? loc.geoJSON?.coordinates?.[0] ?? loc.coordinates?.[0];
+  return toValidLatLng(lat, lng);
+};
+
+const getMissingCoords = (person) => {
+  if (!person) return null;
+  const flat = toValidLatLng(person.lat, person.lng);
+  if (flat) return flat;
+  const loc = person.lastSeenCoordinates || person.lastKnownCoordinates || person.coordinates;
+  if (!loc) return null;
+  const lat = loc.lat ?? loc.latitude ?? loc.geoJSON?.coordinates?.[1] ?? loc.coordinates?.[1];
+  const lng = loc.lng ?? loc.longitude ?? loc.geoJSON?.coordinates?.[0] ?? loc.coordinates?.[0];
+  return toValidLatLng(lat, lng);
+};
+
 // Fly-to helper when a new sighting comes in
 function FlyToSighting({ target }) {
   const map = useMap();
@@ -72,42 +102,58 @@ function FlyToSighting({ target }) {
   return null;
 }
 
+// Auto-fit map bounds once markers/sightings load
+function FitBounds({ coordsList }) {
+  const map = useMap();
+  const hasFitted = useRef(false);
+
+  useEffect(() => {
+    if (hasFitted.current || coordsList.length === 0) return;
+    if (coordsList.length === 1) {
+      map.setView(coordsList[0], 12);
+    } else {
+      const bounds = L.latLngBounds(coordsList);
+      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 13 });
+    }
+    hasFitted.current = true;
+  }, [coordsList, map]);
+
+  return null;
+}
+
 export default function LiveMap({ markers = [], sightings = [], mapType = 'markers', isAdmin = false }) {
   const { subscribe } = useContext(SocketContext);
   const [liveSightings, setLiveSightings] = useState(sightings);
   const [flyTarget, setFlyTarget] = useState(null);
   const [newSightingIds, setNewSightingIds] = useState(new Set());
 
-  // Nigeria center as default
   const DEFAULT_CENTER = [9.0820, 8.6753];
   const DEFAULT_ZOOM = 6;
 
-  // Keep liveSightings in sync when prop changes
   useEffect(() => {
     setLiveSightings(sightings);
   }, [sightings]);
 
-  // Listen for new sightings via Socket.IO
   useEffect(() => {
     const unsub = subscribe('new-sighting', (data) => {
       const sighting = data.sighting || data;
       const coords = getSightingCoords(sighting);
       if (!coords) return;
 
+      const sightingId = sighting._id || sighting.id;
+
       setLiveSightings((prev) => {
-        // avoid duplicates
-        if (prev.find((s) => s._id === sighting._id)) return prev;
+        if (prev.find((s) => (s._id || s.id) === sightingId)) return prev;
         return [sighting, ...prev];
       });
 
-      setNewSightingIds((prev) => new Set([...prev, sighting._id]));
+      setNewSightingIds((prev) => new Set([...prev, sightingId]));
       setFlyTarget(coords);
 
-      // Remove "new" highlight after 10 seconds
       setTimeout(() => {
         setNewSightingIds((prev) => {
           const next = new Set(prev);
-          next.delete(sighting._id);
+          next.delete(sightingId);
           return next;
         });
       }, 10000);
@@ -116,45 +162,27 @@ export default function LiveMap({ markers = [], sightings = [], mapType = 'marke
     return unsub;
   }, [subscribe]);
 
-  // Also listen for status updates (reviewed sightings get re-highlighted briefly)
   useEffect(() => {
     const unsub = subscribe('sighting-status-update', (data) => {
       setLiveSightings((prev) =>
-        prev.map((s) => (s._id === data.sightingId ? { ...s, status: data.status } : s))
+        prev.map((s) =>
+          (s._id || s.id) === data.sightingId ? { ...s, status: data.status } : s
+        )
       );
     });
     return unsub;
   }, [subscribe]);
 
-  // /api/map/all returns flat { lat, lng } on each sighting. Other sources
-  // (e.g. a raw Sighting document from a socket event) may nest it under
-  // `location` instead — handle both.
-  const getSightingCoords = (sighting) => {
-    if (sighting.lat != null && sighting.lng != null) return [sighting.lat, sighting.lng];
-    const loc = sighting.location;
-    if (!loc) return null;
-    const lat = loc.coordinates?.[1] ?? loc.lat ?? loc.latitude;
-    const lng = loc.coordinates?.[0] ?? loc.lng ?? loc.longitude;
-    if (lat == null || lng == null) return null;
-    return [lat, lng];
-  };
-
-  // Same story: /api/map/all returns flat { lat, lng }. A raw MissingPerson
-  // document nests it under `lastSeenCoordinates` (with a GeoJSON fallback).
-  const getMissingCoords = (person) => {
-    if (person.lat != null && person.lng != null) return [person.lat, person.lng];
-    const loc = person.lastSeenCoordinates || person.lastKnownCoordinates || person.coordinates;
-    if (loc?.lat != null && loc?.lng != null) return [loc.lat, loc.lng];
-    if (loc?.geoJSON?.coordinates) return [loc.geoJSON.coordinates[1], loc.geoJSON.coordinates[0]];
-    if (loc?.coordinates) return [loc.coordinates[1], loc.coordinates[0]];
-    return null;
-  };
+  const allCoords = [
+    ...markers.map(getMissingCoords),
+    ...liveSightings.map(getSightingCoords),
+  ].filter(Boolean);
 
   return (
     <MapContainer
       center={DEFAULT_CENTER}
       zoom={DEFAULT_ZOOM}
-      style={{ height: '100%', width: '100%' }}
+      style={{ height: '100%', width: '100%', minHeight: '450px' }}
       className="z-0"
     >
       <TileLayer
@@ -162,6 +190,7 @@ export default function LiveMap({ markers = [], sightings = [], mapType = 'marke
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
 
+      <FitBounds coordsList={allCoords} />
       <FlyToSighting target={flyTarget} />
 
       {/* Missing Persons — red teardrops */}
@@ -170,13 +199,14 @@ export default function LiveMap({ markers = [], sightings = [], mapType = 'marke
         if (!coords) return null;
         const name = person.name || person.fullName || 'Unknown';
         const photo = person.photoUrl || person.photos?.[0];
+        const imageSrc = getImageUrl(photo);
         return (
           <Marker key={person.id || person._id} position={coords} icon={missingIcon}>
             <Popup>
               <div className="min-w-[180px]">
-                {photo && (
+                {imageSrc && (
                   <img
-                    src={getImageUrl(photo)}
+                    src={imageSrc}
                     alt={name}
                     className="w-full h-24 object-cover rounded mb-2"
                   />
@@ -199,19 +229,20 @@ export default function LiveMap({ markers = [], sightings = [], mapType = 'marke
       {liveSightings.map((sighting) => {
         const coords = getSightingCoords(sighting);
         if (!coords) return null;
-        const isNew = newSightingIds.has(sighting._id || sighting.id);
-        const image = sighting.imageUrl || sighting.image?.url || sighting.photo;
+        const sightingId = sighting._id || sighting.id;
+        const isNew = newSightingIds.has(sightingId);
+        const imageSrc = getImageUrl(sighting.imageUrl || sighting.image?.url || sighting.photo);
         return (
           <Marker
-            key={sighting._id || sighting.id}
+            key={sightingId}
             position={coords}
             icon={isNew ? newSightingIcon : sightingIcon}
           >
             <Popup>
               <div className="min-w-[180px]">
-                {image && (
+                {imageSrc && (
                   <img
-                    src={getImageUrl(image)}
+                    src={imageSrc}
                     alt="Sighting"
                     className="w-full h-24 object-cover rounded mb-2"
                   />

@@ -4,8 +4,6 @@ const Match = require('../models/Match.model');
 const { aiService } = require('../services/ai.service');
 const fs = require('fs').promises;
 const path = require('path');
-
-// NEW: Geocoding service (we'll create this next)
 const geocodingService = require('../services/geocoding.service');
 
 /**
@@ -14,20 +12,36 @@ const geocodingService = require('../services/geocoding.service');
  */
 const submitSighting = async (req, res) => {
     const io = req.app.get('io');
-    
+
     try {
         const { description, location, sightingTime, witnessInfo } = req.body;
-        
-        // Parse location if provided as JSON string
+
+        // Parse location safely (handles JSON string, plain address string, or object)
         let parsedLocation = null;
         if (location) {
-            parsedLocation = typeof location === 'string' ? JSON.parse(location) : location;
-            
-            // NEW: Auto-geocode if only address provided but no coordinates
-            if (parsedLocation && parsedLocation.address && (!parsedLocation.lat || !parsedLocation.lng)) {
+            if (typeof location === 'string') {
+                try {
+                    parsedLocation = JSON.parse(location);
+                } catch {
+                    parsedLocation = { address: location };
+                }
+            } else {
+                parsedLocation = { ...location };
+            }
+
+            // Normalize latitude/longitude keys if sent that way
+            if (parsedLocation.latitude != null && parsedLocation.lat == null) {
+                parsedLocation.lat = parseFloat(parsedLocation.latitude);
+            }
+            if (parsedLocation.longitude != null && parsedLocation.lng == null) {
+                parsedLocation.lng = parseFloat(parsedLocation.longitude);
+            }
+
+            // Auto-geocode if address provided without coordinates
+            if (parsedLocation.address && (parsedLocation.lat == null || parsedLocation.lng == null)) {
                 try {
                     const geocoded = await geocodingService.geocodeAddress(parsedLocation.address);
-                    if (geocoded && geocoded.lat && geocoded.lng) {
+                    if (geocoded && geocoded.lat != null && geocoded.lng != null) {
                         parsedLocation.lat = geocoded.lat;
                         parsedLocation.lng = geocoded.lng;
                         parsedLocation.accuracy = 'approximate';
@@ -39,13 +53,21 @@ const submitSighting = async (req, res) => {
                 }
             }
         }
-        
-        // Parse witness info if provided as JSON string
+
+        // Parse witness info safely
         let parsedWitnessInfo = null;
         if (witnessInfo) {
-            parsedWitnessInfo = typeof witnessInfo === 'string' ? JSON.parse(witnessInfo) : witnessInfo;
+            if (typeof witnessInfo === 'string') {
+                try {
+                    parsedWitnessInfo = JSON.parse(witnessInfo);
+                } catch {
+                    parsedWitnessInfo = { notes: witnessInfo };
+                }
+            } else {
+                parsedWitnessInfo = witnessInfo;
+            }
         }
-        
+
         // Extract entities from description using NLP
         let entities = {
             PERSON: [],
@@ -54,7 +76,7 @@ const submitSighting = async (req, res) => {
             ORGANIZATION: [],
             GPE: []
         };
-        
+
         try {
             const nlpResult = await aiService.extractEntities(description);
             if (nlpResult.success && nlpResult.entities) {
@@ -63,29 +85,25 @@ const submitSighting = async (req, res) => {
         } catch (nlpError) {
             console.error('NLP extraction failed:', nlpError.message);
         }
-        
+
         // Generate face embedding from sighting image
         let embedding = null;
         let imageUrl = null;
-        
+
         if (req.file) {
+            imageUrl = `/uploads/faces/${path.basename(req.file.path)}`;
             try {
                 const embeddingResult = await aiService.generateFaceEmbedding(req.file.path);
-                
                 if (embeddingResult.success && embeddingResult.embedding) {
                     embedding = embeddingResult.embedding;
-                    imageUrl = `/uploads/faces/${path.basename(req.file.path)}`;
                 } else {
-                    imageUrl = `/uploads/faces/${path.basename(req.file.path)}`;
                     console.warn('No face detected in sighting image');
                 }
             } catch (faceError) {
                 console.error('Face embedding failed:', faceError.message);
-                imageUrl = `/uploads/faces/${path.basename(req.file.path)}`;
             }
         }
-        
-        // Create sighting record
+
         const sighting = new Sighting({
             description,
             location: parsedLocation,
@@ -103,14 +121,32 @@ const submitSighting = async (req, res) => {
             aiProcessed: embedding !== null,
             aiProcessedAt: embedding !== null ? new Date() : null
         });
-        
-        // NEW: Update GeoJSON before saving
-        if (parsedLocation && parsedLocation.lat && parsedLocation.lng) {
+
+        if (parsedLocation && parsedLocation.lat != null && parsedLocation.lng != null) {
             sighting.updateGeoJSON();
         }
-        
+
         await sighting.save();
-        
+
+        // Emit live map update for new sighting
+        if (io && parsedLocation && parsedLocation.lat != null && parsedLocation.lng != null) {
+            io.emit('new-sighting', {
+                sighting: {
+                    _id: sighting._id,
+                    id: sighting._id,
+                    type: 'sighting',
+                    lat: parsedLocation.lat,
+                    lng: parsedLocation.lng,
+                    address: parsedLocation.address || parsedLocation.placeName,
+                    description: sighting.description,
+                    status: sighting.status,
+                    time: sighting.sightingTime,
+                    imageUrl: sighting.image?.url,
+                    location: sighting.location
+                }
+            });
+        }
+
         // Perform face matching if embedding was generated
         let matches = [];
         if (embedding) {
@@ -119,7 +155,7 @@ const submitSighting = async (req, res) => {
                     status: 'missing',
                     faceEmbedding: { $ne: null }
                 }).select('_id fullName age gender faceEmbedding lastSeenLocation');
-                
+
                 if (missingPersons.length > 0) {
                     const candidates = missingPersons.map(mp => ({
                         id: mp._id,
@@ -129,16 +165,16 @@ const submitSighting = async (req, res) => {
                         gender: mp.gender,
                         lastSeenLocation: mp.lastSeenLocation
                     }));
-                    
+
                     const matchResult = await aiService.findBestMatch(embedding, candidates);
-                    
+
                     if (matchResult.success && matchResult.matches && matchResult.matches.length > 0) {
                         for (const match of matchResult.matches.slice(0, 5)) {
                             const existingMatch = await Match.findOne({
                                 missingPersonId: match.id,
                                 sightingId: sighting._id
                             });
-                            
+
                             if (!existingMatch) {
                                 const matchRecord = new Match({
                                     missingPersonId: match.id,
@@ -147,7 +183,7 @@ const submitSighting = async (req, res) => {
                                     status: 'pending'
                                 });
                                 await matchRecord.save();
-                                
+
                                 matches.push({
                                     missingPersonId: match.id,
                                     name: match.name,
@@ -156,19 +192,19 @@ const submitSighting = async (req, res) => {
                                 });
                             }
                         }
-                        
+
                         const highConfidenceMatches = matches.filter(m => m.score >= 85);
                         if (highConfidenceMatches.length > 0) {
-                            io.emit('new-high-confidence-match', {
-                                sightingId: sighting._id,
-                                sightingDescription: description.substring(0, 100),
-                                matches: highConfidenceMatches,
-                                location: parsedLocation, // NEW: Include location in real-time alert
-                                timestamp: new Date()
-                            });
-                        }
-                        
-                        if (highConfidenceMatches.length > 0) {
+                            if (io) {
+                                io.emit('new-high-confidence-match', {
+                                    sightingId: sighting._id,
+                                    sightingDescription: description.substring(0, 100),
+                                    matches: highConfidenceMatches,
+                                    location: parsedLocation,
+                                    timestamp: new Date()
+                                });
+                            }
+
                             sighting.status = 'matched';
                             await sighting.save();
                         }
@@ -178,7 +214,7 @@ const submitSighting = async (req, res) => {
                 console.error('Face matching failed:', matchError.message);
             }
         }
-        
+
         res.status(201).json({
             success: true,
             data: {
@@ -193,17 +229,17 @@ const submitSighting = async (req, res) => {
                 matches: matches,
                 entities: entities
             },
-            message: matches.length > 0 
-                ? `Sighting submitted with ${matches.length} potential match(es)` 
+            message: matches.length > 0
+                ? `Sighting submitted with ${matches.length} potential match(es)`
                 : 'Sighting submitted successfully. No matches found.'
         });
     } catch (error) {
         console.error('Error submitting sighting:', error);
-        
+
         if (req.file && req.file.path) {
             await fs.unlink(req.file.path).catch(console.error);
         }
-        
+
         res.status(500).json({
             success: false,
             message: error.message || 'Failed to submit sighting'
@@ -217,58 +253,50 @@ const submitSighting = async (req, res) => {
  */
 const getSightings = async (req, res) => {
     try {
-        const { 
-            status, 
+        const {
+            status,
             isUrgent,
             fromDate,
             toDate,
-            page = 1, 
+            page = 1,
             limit = 10,
             sortBy = 'createdAt',
             sortOrder = 'desc',
-            // NEW: Location-based filters
             nearLat,
             nearLng,
             radiusKm = 10,
             hasLocation = false
         } = req.query;
-        
+
         const filter = {};
         if (status) filter.status = status;
         if (isUrgent === 'true') filter.isUrgent = true;
-        
-        // NEW: Filter by sightings with location data
+
         if (hasLocation === 'true') {
             filter['location.lat'] = { $exists: true, $ne: null };
             filter['location.lng'] = { $exists: true, $ne: null };
         }
-        
-        // Date range filter
+
         if (fromDate || toDate) {
             filter.sightingTime = {};
             if (fromDate) filter.sightingTime.$gte = new Date(fromDate);
             if (toDate) filter.sightingTime.$lte = new Date(toDate);
         }
-        
-        // Role-based filtering
+
         if (req.user.role !== 'admin') {
             filter.reportedBy = req.user._id;
         }
-        
+
         const skip = (parseInt(page) - 1) * parseInt(limit);
         const sortDirection = sortOrder === 'desc' ? -1 : 1;
-        
-        let sightingsQuery = Sighting.find(filter);
-        
-        // NEW: Nearby search using aggregation
+
         let total = 0;
         let sightings = [];
-        
+
         if (nearLat && nearLng) {
-            // Use the findNearby method for proximity search
             const results = await Sighting.findNearby(
-                parseFloat(nearLat), 
-                parseFloat(nearLng), 
+                parseFloat(nearLat),
+                parseFloat(nearLng),
                 parseFloat(radiusKm),
                 status
             );
@@ -276,7 +304,7 @@ const getSightings = async (req, res) => {
             total = results.length;
         } else {
             [sightings, total] = await Promise.all([
-                sightingsQuery
+                Sighting.find(filter)
                     .skip(skip)
                     .limit(parseInt(limit))
                     .sort({ [sortBy]: sortDirection })
@@ -285,7 +313,7 @@ const getSightings = async (req, res) => {
                 Sighting.countDocuments(filter)
             ]);
         }
-        
+
         res.json({
             success: true,
             data: sightings,
@@ -314,24 +342,23 @@ const getSightingById = async (req, res) => {
         const sighting = await Sighting.findById(req.params.id)
             .populate('reportedBy', 'name email phone')
             .populate('reviewedBy', 'name email');
-        
+
         if (!sighting) {
             return res.status(404).json({
                 success: false,
                 message: 'Sighting not found'
             });
         }
-        
+
         const matches = await Match.find({ sightingId: sighting._id })
             .sort({ similarityScore: -1 })
             .populate('missingPersonId', 'fullName age gender photos lastSeenLocation status');
-        
+
         res.json({
             success: true,
             data: {
                 ...sighting.toObject(),
                 matches: matches,
-                // NEW: Add map marker data
                 mapMarker: sighting.mapMarker
             }
         });
@@ -351,31 +378,33 @@ const getSightingById = async (req, res) => {
 const updateSightingStatus = async (req, res) => {
     try {
         const { status, reviewerNotes } = req.body;
-        
+
         const sighting = await Sighting.findById(req.params.id);
-        
+
         if (!sighting) {
             return res.status(404).json({
                 success: false,
                 message: 'Sighting not found'
             });
         }
-        
+
         sighting.status = status;
         sighting.reviewedBy = req.user._id;
         sighting.reviewedAt = new Date();
         if (reviewerNotes) sighting.reviewerNotes = reviewerNotes;
-        
+
         await sighting.save();
-        
+
         const io = req.app.get('io');
-        io.emit('sighting-status-update', {
-            sightingId: sighting._id,
-            status: status,
-            updatedBy: req.user.name,
-            location: sighting.location // NEW: Include location in update
-        });
-        
+        if (io) {
+            io.emit('sighting-status-update', {
+                sightingId: sighting._id,
+                status: status,
+                updatedBy: req.user.name,
+                location: sighting.location
+            });
+        }
+
         res.json({
             success: true,
             data: sighting,
@@ -405,13 +434,13 @@ const getSightingStats = async (req, res) => {
                 createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
             })
         ]);
-        
+
         const recentUrgent = await Sighting.find({ isUrgent: true, status: 'pending' })
             .sort({ createdAt: -1 })
             .limit(5)
             .populate('reportedBy', 'name')
             .select('description location sightingTime createdAt');
-        
+
         res.json({
             success: true,
             data: {
@@ -440,17 +469,17 @@ const getSightingStats = async (req, res) => {
 const deleteSighting = async (req, res) => {
     try {
         const sighting = await Sighting.findById(req.params.id);
-        
+
         if (!sighting) {
             return res.status(404).json({
                 success: false,
                 message: 'Sighting not found'
             });
         }
-        
+
         await Match.deleteMany({ sightingId: sighting._id });
         await sighting.deleteOne();
-        
+
         res.json({
             success: true,
             message: 'Sighting and associated matches deleted successfully'
@@ -464,8 +493,6 @@ const deleteSighting = async (req, res) => {
     }
 };
 
-// ============= NEW MAP-SPECIFIC CONTROLLER FUNCTIONS =============
-
 /**
  * Get map summary data (for dashboard map)
  * GET /api/sighting/map/summary
@@ -473,20 +500,19 @@ const deleteSighting = async (req, res) => {
 const getMapSummary = async (req, res) => {
     try {
         const { status, isUrgent } = req.query;
-        
-        let filter = {};
+
+        const filter = {
+            'location.lat': { $exists: true, $ne: null },
+            'location.lng': { $exists: true, $ne: null }
+        };
         if (status) filter.status = status;
         if (isUrgent === 'true') filter.isUrgent = true;
-        
-        // Only get sightings with valid coordinates
-        filter['location.lat'] = { $exists: true, $ne: null };
-        filter['location.lng'] = { $exists: true, $ne: null };
-        
+
         const sightings = await Sighting.find(filter)
-            .select('location status isUrgent sightingTime description createdAt')
+            .select('location status isUrgent sightingTime description image createdAt')
             .sort({ sightingTime: -1 })
-            .limit(500); // Limit for map performance
-        
+            .limit(500);
+
         const mapMarkers = sightings.map(sighting => ({
             id: sighting._id,
             type: 'sighting',
@@ -497,12 +523,13 @@ const getMapSummary = async (req, res) => {
             isUrgent: sighting.isUrgent,
             time: sighting.sightingTime,
             reportedAt: sighting.createdAt,
+            imageUrl: sighting.image?.url,
             description: sighting.description?.substring(0, 100),
-            markerColor: sighting.isUrgent ? 'red' : 
-                        (sighting.status === 'matched' ? 'green' : 
+            markerColor: sighting.isUrgent ? 'red' :
+                        (sighting.status === 'matched' ? 'green' :
                         (sighting.status === 'reviewed' ? 'blue' : 'orange'))
         }));
-        
+
         res.json({
             success: true,
             data: {
@@ -532,21 +559,21 @@ const getMapSummary = async (req, res) => {
 const getNearbySightings = async (req, res) => {
     try {
         const { lat, lng, radius = 10, status } = req.query;
-        
+
         if (!lat || !lng) {
             return res.status(400).json({
                 success: false,
                 message: 'Latitude and longitude are required'
             });
         }
-        
+
         const sightings = await Sighting.findNearby(
             parseFloat(lat),
             parseFloat(lng),
             parseFloat(radius),
             status
         );
-        
+
         res.json({
             success: true,
             data: {
@@ -571,25 +598,21 @@ const getNearbySightings = async (req, res) => {
  */
 const getSightingClusters = async (req, res) => {
     try {
-        const { bounds, zoom } = req.query;
-        
-        // Get all sightings with coordinates
+        const { zoom } = req.query;
+
         const sightings = await Sighting.find({
             'location.lat': { $exists: true, $ne: null },
             'location.lng': { $exists: true, $ne: null }
         }).select('location.lat location.lng status isUrgent');
-        
-        // Simple clustering based on zoom level
+
         const clusterSize = zoom >= 12 ? 1 : (zoom >= 8 ? 3 : 5);
-        
-        // Group sightings into clusters
         const clusters = {};
-        
+
         sightings.forEach(sighting => {
             const latKey = Math.floor(sighting.location.lat / clusterSize) * clusterSize;
             const lngKey = Math.floor(sighting.location.lng / clusterSize) * clusterSize;
             const key = `${latKey},${lngKey}`;
-            
+
             if (!clusters[key]) {
                 clusters[key] = {
                     lat: latKey + clusterSize / 2,
@@ -600,13 +623,13 @@ const getSightingClusters = async (req, res) => {
                     pendingCount: 0
                 };
             }
-            
+
             clusters[key].count++;
             if (sighting.isUrgent) clusters[key].urgentCount++;
             if (sighting.status === 'matched') clusters[key].matchedCount++;
             if (sighting.status === 'pending') clusters[key].pendingCount++;
         });
-        
+
         res.json({
             success: true,
             data: {
@@ -631,7 +654,6 @@ module.exports = {
     updateSightingStatus,
     getSightingStats,
     deleteSighting,
-    // NEW exported functions
     getMapSummary,
     getNearbySightings,
     getSightingClusters
