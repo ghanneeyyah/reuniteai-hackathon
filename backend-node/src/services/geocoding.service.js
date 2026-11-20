@@ -1,35 +1,27 @@
 /**
  * Geocoding Service
  * Converts addresses to coordinates and vice versa
- * Supports multiple geocoding providers with fallback
+ * Supports multiple geocoding providers with progressive address fallback
  */
 
 const axios = require('axios');
 
 class GeocodingService {
     constructor() {
-        // You can add API keys here for paid services
         this.googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY || null;
         this.mapboxApiKey = process.env.MAPBOX_API_KEY || null;
-        
-        // Default to OpenStreetMap (Nominatim) - free, no API key needed
         this.defaultProvider = process.env.GEOCODING_PROVIDER || 'nominatim';
-        
-        // Rate limiting for Nominatim (1 request per second is recommended)
+        this.defaultCountry = process.env.DEFAULT_COUNTRY || 'Nigeria';
+
+        // Rate limiting for Nominatim (1 request per second)
         this.lastRequestTime = 0;
-        this.requestDelay = 1000; // 1 second delay between requests
+        this.requestDelay = 1000;
     }
 
-    /**
-     * Delay helper for rate limiting
-     */
     async delay(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    /**
-     * Ensure rate limiting for Nominatim API
-     */
     async respectRateLimit() {
         const now = Date.now();
         const timeSinceLastRequest = now - this.lastRequestTime;
@@ -40,14 +32,50 @@ class GeocodingService {
     }
 
     /**
-     * Geocode an address to coordinates using OpenStreetMap Nominatim (Free)
-     * @param {string} address - The address to geocode
-     * @returns {Promise<{lat: number, lng: number, displayName: string, accuracy: string}>}
+     * Build progressively broader address queries when an exact street/house number isn't indexed
+     * Example: "9, Temvic Crescent, Ogijo" ->
+     *   ["9, Temvic Crescent, Ogijo", "Temvic Crescent, Ogijo", "Ogijo, Nigeria", "Ogijo"]
      */
+    buildFallbackQueries(address) {
+        const clean = address.trim().replace(/\s+/g, ' ');
+        const candidates = [];
+        const add = (q) => {
+            const trimmed = q.trim().replace(/^[,.\s]+|[,.\s]+$/g, '');
+            if (trimmed && !candidates.includes(trimmed)) {
+                candidates.push(trimmed);
+            }
+        };
+
+        add(clean);
+
+        // Strip leading house/plot number (e.g., "No. 9, ..." or "11, ...")
+        const withoutNumber = clean.replace(/^(?:no\.?\s*|plot\s*)?\d+[a-zA-Z]?\s*[,/-]?\s*/i, '');
+        if (withoutNumber !== clean) {
+            add(withoutNumber);
+        }
+
+        // Progressively drop the most specific comma-separated parts from the left
+        const parts = clean.split(',').map((p) => p.trim()).filter(Boolean);
+        for (let i = 1; i < parts.length; i++) {
+            const broader = parts.slice(i).join(', ');
+            add(broader);
+            if (!broader.toLowerCase().includes(this.defaultCountry.toLowerCase())) {
+                add(`${broader}, ${this.defaultCountry}`);
+            }
+        }
+
+        // Also try the full address with default country appended
+        if (!clean.toLowerCase().includes(this.defaultCountry.toLowerCase())) {
+            add(`${clean}, ${this.defaultCountry}`);
+        }
+
+        return candidates;
+    }
+
     async geocodeWithNominatim(address) {
         try {
             await this.respectRateLimit();
-            
+
             const url = 'https://nominatim.openstreetmap.org/search';
             const response = await axios.get(url, {
                 params: {
@@ -57,7 +85,7 @@ class GeocodingService {
                     addressdetails: 1
                 },
                 headers: {
-                    'User-Agent': 'MissingPersonsPlatform/1.0' // Required by Nominatim
+                    'User-Agent': 'MissingPersonsPlatform/1.0'
                 },
                 timeout: 10000
             });
@@ -74,7 +102,7 @@ class GeocodingService {
                     importance: result.importance
                 };
             }
-            
+
             return null;
         } catch (error) {
             console.error('Nominatim geocoding error:', error.message);
@@ -82,24 +110,13 @@ class GeocodingService {
         }
     }
 
-    /**
-     * Geocode an address using Google Maps API (Requires API Key)
-     * @param {string} address - The address to geocode
-     * @returns {Promise<{lat: number, lng: number, displayName: string, accuracy: string}>}
-     */
     async geocodeWithGoogle(address) {
-        if (!this.googleMapsApiKey) {
-            console.warn('Google Maps API key not configured');
-            return null;
-        }
+        if (!this.googleMapsApiKey) return null;
 
         try {
             const url = 'https://maps.googleapis.com/maps/api/geocode/json';
             const response = await axios.get(url, {
-                params: {
-                    address: address,
-                    key: this.googleMapsApiKey
-                },
+                params: { address, key: this.googleMapsApiKey },
                 timeout: 10000
             });
 
@@ -115,7 +132,7 @@ class GeocodingService {
                     placeId: result.place_id
                 };
             }
-            
+
             return null;
         } catch (error) {
             console.error('Google geocoding error:', error.message);
@@ -123,24 +140,13 @@ class GeocodingService {
         }
     }
 
-    /**
-     * Geocode an address using Mapbox API (Requires API Key)
-     * @param {string} address - The address to geocode
-     * @returns {Promise<{lat: number, lng: number, displayName: string, accuracy: string}>}
-     */
     async geocodeWithMapbox(address) {
-        if (!this.mapboxApiKey) {
-            console.warn('Mapbox API key not configured');
-            return null;
-        }
+        if (!this.mapboxApiKey) return null;
 
         try {
             const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(address)}.json`;
             const response = await axios.get(url, {
-                params: {
-                    access_token: this.mapboxApiKey,
-                    limit: 1
-                },
+                params: { access_token: this.mapboxApiKey, limit: 1 },
                 timeout: 10000
             });
 
@@ -156,7 +162,7 @@ class GeocodingService {
                     id: result.id
                 };
             }
-            
+
             return null;
         } catch (error) {
             console.error('Mapbox geocoding error:', error.message);
@@ -164,113 +170,68 @@ class GeocodingService {
         }
     }
 
-    /**
-     * Main geocoding method - tries providers in order until success
-     * @param {string} address - The address to geocode
-     * @param {string} preferredProvider - Optional: 'google', 'mapbox', 'nominatim'
-     * @returns {Promise<{lat: number, lng: number, displayName: string, accuracy: string}>}
-     */
-    async geocodeAddress(address, preferredProvider = null) {
-        if (!address || address.trim() === '') {
-            return null;
-        }
-
-        // Clean and normalize address
-        const cleanAddress = address.trim();
-        
-        // Try preferred provider first if specified
-        if (preferredProvider) {
-            let result = null;
-            switch (preferredProvider) {
-                case 'google':
-                    result = await this.geocodeWithGoogle(cleanAddress);
-                    break;
-                case 'mapbox':
-                    result = await this.geocodeWithMapbox(cleanAddress);
-                    break;
-                case 'nominatim':
-                    result = await this.geocodeWithNominatim(cleanAddress);
-                    break;
-            }
-            if (result) return result;
-        }
-
-        // Try providers in order based on configuration
+    async tryProviders(query, preferredProvider = null) {
         const providers = [];
-        
-        if (this.googleMapsApiKey) providers.push('google');
-        if (this.mapboxApiKey) providers.push('mapbox');
-        providers.push('nominatim'); // Always fallback to free provider
+        if (preferredProvider) providers.push(preferredProvider);
+        if (this.googleMapsApiKey && !providers.includes('google')) providers.push('google');
+        if (this.mapboxApiKey && !providers.includes('mapbox')) providers.push('mapbox');
+        if (!providers.includes('nominatim')) providers.push('nominatim');
 
         for (const provider of providers) {
             let result = null;
-            switch (provider) {
-                case 'google':
-                    result = await this.geocodeWithGoogle(cleanAddress);
-                    break;
-                case 'mapbox':
-                    result = await this.geocodeWithMapbox(cleanAddress);
-                    break;
-                case 'nominatim':
-                    result = await this.geocodeWithNominatim(cleanAddress);
-                    break;
-            }
-            
+            if (provider === 'google') result = await this.geocodeWithGoogle(query);
+            else if (provider === 'mapbox') result = await this.geocodeWithMapbox(query);
+            else if (provider === 'nominatim') result = await this.geocodeWithNominatim(query);
+
+            if (result) return result;
+        }
+        return null;
+    }
+
+    async geocodeAddress(address, preferredProvider = null) {
+        if (!address || address.trim() === '') return null;
+
+        const queries = this.buildFallbackQueries(address);
+
+        for (let i = 0; i < queries.length; i++) {
+            const query = queries[i];
+            const result = await this.tryProviders(query, preferredProvider);
             if (result) {
-                console.log(`Geocoding successful with ${provider}: "${cleanAddress}" → (${result.lat}, ${result.lng})`);
+                if (i > 0) {
+                    result.accuracy = 'approximate';
+                }
+                console.log(`Geocoding successful ("${address}" via "${query}") → (${result.lat}, ${result.lng})`);
                 return result;
             }
         }
 
-        console.warn(`Geocoding failed for address: "${cleanAddress}"`);
+        console.warn(`Geocoding failed for address: "${address}"`);
         return null;
     }
 
-    /**
-     * Batch geocode multiple addresses
-     * @param {string[]} addresses - Array of addresses to geocode
-     * @returns {Promise<Array<{address: string, coordinates: object, success: boolean}>>}
-     */
     async batchGeocode(addresses) {
         const results = [];
-        
         for (const address of addresses) {
             const geocoded = await this.geocodeAddress(address);
             results.push({
-                address: address,
+                address,
                 coordinates: geocoded ? { lat: geocoded.lat, lng: geocoded.lng } : null,
                 displayName: geocoded?.displayName || null,
                 success: !!geocoded
             });
-            
-            // Add delay between batch requests
             await this.delay(200);
         }
-        
         return results;
     }
 
-    /**
-     * Reverse geocode - get address from coordinates
-     * @param {number} lat - Latitude
-     * @param {number} lng - Longitude
-     * @returns {Promise<{address: string, displayName: string, components: object}>}
-     */
     async reverseGeocode(lat, lng) {
         try {
             await this.respectRateLimit();
-            
+
             const url = 'https://nominatim.openstreetmap.org/reverse';
             const response = await axios.get(url, {
-                params: {
-                    lat: lat,
-                    lon: lng,
-                    format: 'json',
-                    addressdetails: 1
-                },
-                headers: {
-                    'User-Agent': 'MissingPersonsPlatform/1.0'
-                },
+                params: { lat, lon: lng, format: 'json', addressdetails: 1 },
+                headers: { 'User-Agent': 'MissingPersonsPlatform/1.0' },
                 timeout: 10000
             });
 
@@ -283,7 +244,7 @@ class GeocodingService {
                     lng: parseFloat(response.data.lon)
                 };
             }
-            
+
             return null;
         } catch (error) {
             console.error('Reverse geocoding error:', error.message);
@@ -291,119 +252,77 @@ class GeocodingService {
         }
     }
 
-    /**
-     * Determine accuracy level based on Nominatim result
-     */
     determineAccuracy(result) {
-        // Based on result type and importance
-        if (result.type === 'house' || result.type === 'building') {
-            return 'exact';
-        } else if (result.type === 'street' || result.type === 'road') {
-            return 'approximate';
-        } else if (result.type === 'city' || result.type === 'town') {
-            return 'estimated';
-        } else if (result.importance > 0.7) {
-            return 'approximate';
-        }
+        if (result.type === 'house' || result.type === 'building') return 'exact';
+        if (result.type === 'street' || result.type === 'road') return 'approximate';
+        if (result.type === 'city' || result.type === 'town') return 'estimated';
+        if (result.importance > 0.7) return 'approximate';
         return 'estimated';
     }
 
-    /**
-     * Determine accuracy based on Google location type
-     */
     determineGoogleAccuracy(locationType) {
         switch (locationType) {
-            case 'ROOFTOP':
-                return 'exact';
-            case 'RANGE_INTERPOLATED':
-                return 'approximate';
-            case 'GEOMETRIC_CENTER':
-                return 'estimated';
-            case 'APPROXIMATE':
-                return 'estimated';
-            default:
-                return 'approximate';
+            case 'ROOFTOP': return 'exact';
+            case 'RANGE_INTERPOLATED': return 'approximate';
+            case 'GEOMETRIC_CENTER': return 'estimated';
+            case 'APPROXIMATE': return 'estimated';
+            default: return 'approximate';
         }
     }
 
-    /**
-     * Determine accuracy based on Mapbox relevance score
-     */
     determineMapboxAccuracy(relevance) {
         if (relevance >= 0.99) return 'exact';
         if (relevance >= 0.9) return 'approximate';
         return 'estimated';
     }
 
-    /**
-     * Validate coordinates
-     * @param {number} lat - Latitude
-     * @param {number} lng - Longitude
-     * @returns {boolean} - True if valid
-     */
     isValidCoordinates(lat, lng) {
         return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
     }
 
-    /**
-     * Get distance between two coordinates in km (Haversine formula)
-     * @param {number} lat1 - First latitude
-     * @param {number} lng1 - First longitude
-     * @param {number} lat2 - Second latitude
-     * @param {number} lng2 - Second longitude
-     * @returns {number} - Distance in kilometers
-     */
     getDistance(lat1, lng1, lat2, lng2) {
-        const R = 6371; // Earth's radius in km
+        const R = 6371;
         const dLat = (lat2 - lat1) * Math.PI / 180;
         const dLng = (lng2 - lng1) * Math.PI / 180;
-        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+        const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
                   Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                  Math.sin(dLng/2) * Math.sin(dLng/2);
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+                  Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         return R * c;
     }
 
-    /**
-     * Extract location entities from text and try to geocode them
-     * @param {string} text - Text containing location descriptions
-     * @returns {Promise<Array<{location: string, coordinates: object}>>}
-     */
     async extractAndGeocodeLocations(text) {
-        // Common location patterns
         const locationPatterns = [
             /(?:in|at|near|around)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/g,
             /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:city|town|village|area)/gi
         ];
-        
+
         const potentialLocations = new Set();
-        
+
         for (const pattern of locationPatterns) {
             let match;
             while ((match = pattern.exec(text)) !== null) {
                 potentialLocations.add(match[1]);
             }
         }
-        
-        // Geocode each potential location
+
         const results = [];
         for (const location of potentialLocations) {
             const geocoded = await this.geocodeAddress(location);
             if (geocoded) {
                 results.push({
-                    location: location,
+                    location,
                     coordinates: { lat: geocoded.lat, lng: geocoded.lng },
                     displayName: geocoded.displayName,
                     accuracy: geocoded.accuracy
                 });
             }
         }
-        
+
         return results;
     }
 }
 
-// Create singleton instance
 const geocodingService = new GeocodingService();
 
 module.exports = geocodingService;

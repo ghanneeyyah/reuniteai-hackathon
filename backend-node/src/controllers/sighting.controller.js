@@ -5,6 +5,7 @@ const { aiService } = require('../services/ai.service');
 const fs = require('fs').promises;
 const path = require('path');
 const geocodingService = require('../services/geocoding.service');
+const notificationService = require('../services/notification.service');
 
 /**
  * Submit a sighting report
@@ -154,7 +155,7 @@ const submitSighting = async (req, res) => {
                 const missingPersons = await MissingPerson.find({
                     status: 'missing',
                     faceEmbedding: { $ne: null }
-                }).select('_id fullName age gender faceEmbedding lastSeenLocation');
+                }).select('_id fullName age gender faceEmbedding lastSeenLocation createdBy');
 
                 if (missingPersons.length > 0) {
                     const candidates = missingPersons.map(mp => ({
@@ -183,6 +184,15 @@ const submitSighting = async (req, res) => {
                                     status: 'pending'
                                 });
                                 await matchRecord.save();
+
+                                const matchedPerson = missingPersons.find(
+                                    (mp) => mp._id.toString() === match.id.toString()
+                                );
+                                notificationService.notifyMatchFound({
+                                    missingPerson: matchedPerson,
+                                    sighting,
+                                    match: matchRecord
+                                });
 
                                 matches.push({
                                     missingPersonId: match.id,
@@ -394,6 +404,8 @@ const updateSightingStatus = async (req, res) => {
         if (reviewerNotes) sighting.reviewerNotes = reviewerNotes;
 
         await sighting.save();
+
+        notificationService.notifySightingStatusChange({ sighting, status });
 
         const io = req.app.get('io');
         if (io) {

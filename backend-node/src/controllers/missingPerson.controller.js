@@ -1,6 +1,7 @@
 const MissingPerson = require('../models/MissingPerson.model');
 const Match = require('../models/Match.model');
 const { aiService } = require('../services/ai.service');
+const notificationService = require('../services/notification.service');
 const fs = require('fs').promises;
 const path = require('path');
 
@@ -11,6 +12,63 @@ try {
     console.warn('Geocoding service not yet available, will use fallback');
     geocodingService = null;
 }
+
+/**
+ * Background worker: geocode address + generate face embeddings after response is sent
+ */
+const processMissingPersonAsync = async (missingPersonId, uploadedFiles, needsGeocoding, lastSeenLocation) => {
+    try {
+        const missingPerson = await MissingPerson.findById(missingPersonId);
+        if (!missingPerson) return;
+
+        let changed = false;
+
+        if (needsGeocoding && lastSeenLocation && geocodingService) {
+            try {
+                const geocoded = await geocodingService.geocodeAddress(lastSeenLocation);
+                if (geocoded && geocoded.lat != null && geocoded.lng != null) {
+                    missingPerson.lastSeenCoordinates = {
+                        lat: geocoded.lat,
+                        lng: geocoded.lng,
+                        accuracy: 'approximate',
+                        source: 'address_geocoded'
+                    };
+                    missingPerson.updateGeoJSON();
+                    changed = true;
+                }
+            } catch (geoError) {
+                console.error('Background geocoding failed:', geoError.message);
+            }
+        }
+
+        let primaryEmbedding = missingPerson.faceEmbedding || null;
+        for (let i = 0; i < uploadedFiles.length; i++) {
+            const file = uploadedFiles[i];
+            try {
+                const embeddingResult = await aiService.generateFaceEmbedding(file.path);
+                if (embeddingResult.success && embeddingResult.embedding) {
+                    if (!primaryEmbedding) {
+                        primaryEmbedding = embeddingResult.embedding;
+                        missingPerson.faceEmbedding = primaryEmbedding;
+                    }
+                    if (missingPerson.photos[i]) {
+                        missingPerson.photos[i].embeddingId = 'generated';
+                    }
+                    changed = true;
+                }
+            } catch (aiErr) {
+                console.warn(`Background AI embedding failed for ${file.originalname}:`, aiErr.message);
+            }
+        }
+
+        if (changed) {
+            await missingPerson.save();
+            console.log(`✅ Background processing complete for missing person ${missingPersonId}`);
+        }
+    } catch (err) {
+        console.error(`Background processing error for ${missingPersonId}:`, err.message);
+    }
+};
 
 /**
  * Register a missing person
@@ -28,61 +86,32 @@ const registerMissingPerson = async (req, res) => {
             missingPersonData.contactInfo = JSON.parse(missingPersonData.contactInfo);
         }
 
+        if (typeof missingPersonData.lastSeenCoordinates === 'string') {
+            missingPersonData.lastSeenCoordinates = JSON.parse(missingPersonData.lastSeenCoordinates);
+        }
+
         missingPersonData.createdBy = req.user._id;
 
-        if (missingPersonData.lastSeenLocation && (!missingPersonData.lastSeenCoordinates || !missingPersonData.lastSeenCoordinates.lat)) {
-            if (geocodingService) {
-                try {
-                    const geocoded = await geocodingService.geocodeAddress(missingPersonData.lastSeenLocation);
-                    if (geocoded && geocoded.lat && geocoded.lng) {
-                        missingPersonData.lastSeenCoordinates = {
-                            lat: geocoded.lat,
-                            lng: geocoded.lng,
-                            accuracy: 'approximate',
-                            source: 'address_geocoded'
-                        };
-                    }
-                } catch (geoError) {
-                    console.error('Geocoding failed for last seen location:', geoError.message);
-                }
-            }
-        }
-
-        // Handle multiple file uploads (req.files is an array from uploadMultipleImages)
         const uploadedFiles = req.files || (req.file ? [req.file] : []);
-        const photos = [];
-        let primaryEmbedding = null;
-
-        for (let i = 0; i < uploadedFiles.length; i++) {
-            const file = uploadedFiles[i];
-            const photoUrl = `/uploads/faces/${path.basename(file.path)}`;
-            let embedding = null;
-
-            try {
-                const embeddingResult = await aiService.generateFaceEmbedding(file.path);
-                if (embeddingResult.success && embeddingResult.embedding) {
-                    embedding = embeddingResult.embedding;
-                    if (!primaryEmbedding) primaryEmbedding = embedding;
-                }
-            } catch (aiErr) {
-                console.warn(`AI embedding failed for file ${file.originalname}:`, aiErr.message);
-            }
-
-            photos.push({
-                url: photoUrl,
-                isPrimary: i === 0,
-                embeddingId: embedding ? 'generated' : null,
-                uploadedAt: new Date()
-            });
-        }
+        const photos = uploadedFiles.map((file, i) => ({
+            url: `/uploads/faces/${path.basename(file.path)}`,
+            isPrimary: i === 0,
+            embeddingId: null,
+            uploadedAt: new Date()
+        }));
 
         const missingPerson = new MissingPerson({
             ...missingPersonData,
             photos,
-            faceEmbedding: primaryEmbedding
+            faceEmbedding: null
         });
 
-        if (missingPerson.lastSeenCoordinates && missingPerson.lastSeenCoordinates.lat) {
+        const hasCoords =
+            missingPerson.lastSeenCoordinates &&
+            missingPerson.lastSeenCoordinates.lat != null &&
+            missingPerson.lastSeenCoordinates.lng != null;
+
+        if (hasCoords) {
             missingPerson.updateGeoJSON();
         }
 
@@ -93,10 +122,18 @@ const registerMissingPerson = async (req, res) => {
             data: missingPerson,
             message: 'Missing person registered successfully'
         });
+
+        setImmediate(() => {
+            processMissingPersonAsync(
+                missingPerson._id,
+                uploadedFiles,
+                !hasCoords,
+                missingPersonData.lastSeenLocation
+            );
+        });
     } catch (error) {
         console.error('Error registering missing person:', error);
 
-        // Clean up all uploaded files on error
         const uploadedFiles = req.files || (req.file ? [req.file] : []);
         for (const file of uploadedFiles) {
             await fs.unlink(file.path).catch(console.error);
@@ -259,15 +296,19 @@ const updateMissingPersonStatus = async (req, res) => {
 
         await missingPerson.save();
 
+        notificationService.notifyMissingPersonStatusChange({ missingPerson, status });
+
         const io = req.app.get('io');
-        io.emit('missing-person-status-update', {
-            missingPersonId: missingPerson._id,
-            name: missingPerson.fullName,
-            oldStatus,
-            newStatus: status,
-            location: missingPerson.lastSeenCoordinates,
-            address: missingPerson.lastSeenLocation
-        });
+        if (io) {
+            io.emit('missing-person-status-update', {
+                missingPersonId: missingPerson._id,
+                name: missingPerson.fullName,
+                oldStatus,
+                newStatus: status,
+                location: missingPerson.lastSeenCoordinates,
+                address: missingPerson.lastSeenLocation
+            });
+        }
 
         res.json({
             success: true,

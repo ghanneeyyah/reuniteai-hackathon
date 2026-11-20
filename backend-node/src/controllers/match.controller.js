@@ -143,9 +143,9 @@ const runBatchMatching = async (req, res) => {
         // 3. Match all sightings with embeddings against all missing persons with embeddings
         const [missingPersons, sightings] = await Promise.all([
             MissingPerson.find({ status: 'missing', faceEmbedding: { $exists: true, $ne: null } })
-                .select('_id fullName age gender faceEmbedding lastSeenLocation'),
+                .select('_id fullName age gender faceEmbedding lastSeenLocation createdBy'),
             Sighting.find({ faceEmbedding: { $exists: true, $ne: null } })
-                .select('_id faceEmbedding status')
+                .select('_id faceEmbedding status reportedBy')
         ]);
 
         const candidates = missingPersons
@@ -169,7 +169,7 @@ const runBatchMatching = async (req, res) => {
                         });
                         if (!exists) {
                             const confidence = match.score >= 85 ? 'high' : (match.score >= 65 ? 'medium' : 'low');
-                            await Match.create({
+                            const createdMatch = await Match.create({
                                 missingPersonId: match.id,
                                 sightingId: sighting._id,
                                 similarityScore: match.score,
@@ -177,6 +177,15 @@ const runBatchMatching = async (req, res) => {
                                 status: 'pending'
                             });
                             matchesCreated++;
+
+                            const matchedPerson = missingPersons.find(
+                                (mp) => mp._id.toString() === match.id.toString()
+                            );
+                            await notificationService.notifyMatchFound({
+                                missingPerson: matchedPerson,
+                                sighting,
+                                match: createdMatch
+                            });
                         }
                     }
                 }
@@ -449,15 +458,23 @@ const verifyMatch = async (req, res) => {
 
         let notificationResult = null;
         try {
-            const missingPerson = await MissingPerson.findById(match.missingPersonId);
-            if (missingPerson) {
-                notificationResult = await notificationService.notifyFamilyOfMatch(missingPerson, match);
-                match.notificationSent = notificationResult.emailSent || notificationResult.smsSent;
+            const [missingPerson, sighting] = await Promise.all([
+                MissingPerson.findById(match.missingPersonId),
+                Sighting.findById(match.sightingId)
+            ]);
+
+            if (missingPerson || sighting) {
+                notificationResult = await notificationService.notifyMatchVerified({
+                    missingPerson,
+                    sighting,
+                    match
+                });
+                match.notificationSent = true;
                 match.notificationSentAt = new Date();
                 await match.save();
             }
         } catch (notifyError) {
-            console.error('Error notifying family of verified match:', notifyError.message);
+            console.error('Error notifying reporters of verified match:', notifyError.message);
         }
 
         res.json({
@@ -492,6 +509,21 @@ const rejectMatch = async (req, res) => {
         }
 
         await match.reject(req.user._id, reason);
+
+        try {
+            const [missingPerson, sighting] = await Promise.all([
+                MissingPerson.findById(match.missingPersonId),
+                Sighting.findById(match.sightingId)
+            ]);
+            await notificationService.notifyMatchRejected({
+                missingPerson,
+                sighting,
+                match,
+                reason
+            });
+        } catch (notifyError) {
+            console.error('Error notifying reporter of rejected match:', notifyError.message);
+        }
 
         res.json({
             success: true,
@@ -595,14 +627,25 @@ const resolveMatch = async (req, res) => {
             });
         }
 
+        const wasVerified = match.status === 'verified';
         await match.resolve(req.user._id, resolutionNotes);
 
-        if (match.status === 'verified') {
-            await MissingPerson.findByIdAndUpdate(match.missingPersonId, {
-                status: 'found',
-                foundDate: new Date(),
-                foundNotes: resolutionNotes
-            });
+        if (wasVerified) {
+            const updatedPerson = await MissingPerson.findByIdAndUpdate(
+                match.missingPersonId,
+                {
+                    status: 'found',
+                    foundDate: new Date(),
+                    foundNotes: resolutionNotes
+                },
+                { new: true }
+            );
+            if (updatedPerson) {
+                notificationService.notifyMissingPersonStatusChange({
+                    missingPerson: updatedPerson,
+                    status: 'found'
+                });
+            }
         }
 
         res.json({

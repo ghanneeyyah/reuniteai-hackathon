@@ -1,7 +1,7 @@
 // src/pages/citizen/SightingDetailPage.jsx
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, MapPin, Calendar, Clock, Eye } from 'lucide-react';
+import { ArrowLeft, MapPin, Calendar, Eye } from 'lucide-react';
 import sightingService from '../../services/sighting.service';
 import { formatDateTime, timeAgo, getStatusColor, formatLocation, getImageUrl } from '../../utils/helpers';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
@@ -54,6 +54,12 @@ export default function SightingDetailPage() {
 
   if (!sighting) return null;
 
+  const photoUrl = getImageUrl(sighting.image || sighting.photo || sighting.imageUrl);
+  const lat = sighting.location?.lat ?? sighting.latitude;
+  const lng = sighting.location?.lng ?? sighting.longitude;
+  const reportedAt = sighting.sightingTime || sighting.createdAt;
+  const relatedMatches = sighting.matches || [];
+
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       {/* Header */}
@@ -69,9 +75,9 @@ export default function SightingDetailPage() {
         {/* Left - Photo */}
         <div className="lg:col-span-1">
           <div className="aspect-square bg-gray-100 rounded-xl overflow-hidden">
-            {sighting.photo ? (
+            {photoUrl ? (
               <img
-                src={getImageUrl(sighting.photo || sighting.image)}
+                src={photoUrl}
                 alt="Sighting"
                 className="w-full h-full object-cover"
               />
@@ -100,9 +106,9 @@ export default function SightingDetailPage() {
                 <div>
                   <p className="font-medium text-gray-700">Location</p>
                   <p className="text-gray-600">{formatLocation(sighting.location)}</p>
-                  {sighting.latitude && sighting.longitude && (
+                  {lat != null && lng != null && (
                     <p className="text-gray-400 text-xs mt-1">
-                      {sighting.latitude}, {sighting.longitude}
+                      {Number(lat).toFixed(5)}, {Number(lng).toFixed(5)}
                     </p>
                   )}
                 </div>
@@ -112,8 +118,8 @@ export default function SightingDetailPage() {
                 <Calendar className="w-5 h-5 text-maroon-800 mt-0.5 flex-shrink-0" />
                 <div>
                   <p className="font-medium text-gray-700">Reported</p>
-                  <p className="text-gray-600">{formatDateTime(sighting.createdAt)}</p>
-                  <p className="text-gray-400 text-xs">{timeAgo(sighting.createdAt)}</p>
+                  <p className="text-gray-600">{formatDateTime(reportedAt)}</p>
+                  <p className="text-gray-400 text-xs">{timeAgo(reportedAt)}</p>
                 </div>
               </div>
             </div>
@@ -126,11 +132,13 @@ export default function SightingDetailPage() {
             </div>
           )}
 
-          {sighting.missingPerson && (
+          {(sighting.missingPerson || relatedMatches.length > 0) && (
             <div className="card p-6">
               <h3 className="text-lg font-semibold text-gray-900 mb-3">Related Missing Person</h3>
-              <p className="text-gray-700">
-                This sighting may be related to a missing person case. Administrators are reviewing.
+              <p className="text-gray-700 text-sm">
+                {relatedMatches.length > 0
+                  ? `${relatedMatches.length} potential match(es) identified. Administrators are reviewing.`
+                  : 'This sighting may be related to a missing person case. Administrators are reviewing.'}
               </p>
             </div>
           )}

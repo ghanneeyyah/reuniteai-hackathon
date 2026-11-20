@@ -1,13 +1,41 @@
 // src/components/admin/MatchDetailModal.jsx
 import { X, User, MapPin, Calendar, CheckCircle, XCircle, Search } from 'lucide-react';
 import { formatMatchPercentage, formatConfidenceLevel } from '../../utils/formatters';
-import { formatDateTime, getImageUrl } from '../../utils/helpers';
+import { formatDateTime, formatLocation, getImageUrl } from '../../utils/helpers';
 
 export default function MatchDetailModal({ match, onClose, onVerify, onReject }) {
   if (!match) return null;
 
-  const confidence = match.confidence || match.matchPercentage || 0;
-  const confidenceInfo = formatConfidenceLevel(confidence);
+  const missingPerson =
+    (typeof match.missingPersonId === 'object' && match.missingPersonId) ||
+    match.missingPerson ||
+    {};
+
+  const sighting =
+    (typeof match.sightingId === 'object' && match.sightingId) ||
+    match.sighting ||
+    {};
+
+  const score = Number(
+    match.similarityScore ??
+    match.matchPercentage ??
+    (typeof match.confidence === 'number' ? match.confidence : 0)
+  );
+  const safeScore = Number.isFinite(score) ? score : 0;
+  const confidenceInfo = formatConfidenceLevel(safeScore);
+
+  const missingName =
+    missingPerson.fullName ||
+    missingPerson.name ||
+    [missingPerson.firstName, missingPerson.lastName].filter(Boolean).join(' ') ||
+    'Unknown';
+
+  const missingPhotoUrl = getImageUrl(missingPerson.photos || missingPerson.photo);
+  const sightingPhotoUrl = getImageUrl(sighting.image || sighting.photo || sighting.imageUrl);
+
+  const notes = match.investigationNotes?.length
+    ? match.investigationNotes
+    : match.notes || [];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -16,7 +44,10 @@ export default function MatchDetailModal({ match, onClose, onVerify, onReject })
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">Match Details</h2>
-          <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">
+          <button
+            onClick={onClose}
+            className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600"
+          >
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -25,7 +56,7 @@ export default function MatchDetailModal({ match, onClose, onVerify, onReject })
           {/* Confidence */}
           <div className="text-center p-4 bg-maroon-50 rounded-xl">
             <div className="text-3xl font-bold text-maroon-800">
-              {formatMatchPercentage(confidence)}
+              {formatMatchPercentage(safeScore)}
             </div>
             <p className={`text-sm font-medium mt-1 ${confidenceInfo.color}`}>
               {confidenceInfo.label} Confidence
@@ -41,17 +72,22 @@ export default function MatchDetailModal({ match, onClose, onVerify, onReject })
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div>
                 <span className="text-gray-500">Name:</span>
-                <p className="text-gray-900 font-medium">
-                   {match.missingPerson?.name || 'Unknown'}
-                </p>
+                <p className="text-gray-900 font-medium">{missingName}</p>
               </div>
               <div>
-                <span className="text-gray-500">Age:</span>
-                <p className="text-gray-900">{match.missingPerson?.age || 'N/A'}</p>
+                <span className="text-gray-500">Age / Gender:</span>
+                <p className="text-gray-900 capitalize">
+                  {missingPerson.age ?? 'N/A'}
+                  {missingPerson.gender ? ` • ${missingPerson.gender}` : ''}
+                </p>
               </div>
               <div className="col-span-2">
                 <span className="text-gray-500">Last Known Location:</span>
-                <p className="text-gray-900">{match.missingPerson?.lastKnownLocation || 'N/A'}</p>
+                <p className="text-gray-900">
+                  {formatLocation(
+                    missingPerson.lastSeenLocation || missingPerson.lastKnownLocation
+                  )}
+                </p>
               </div>
             </div>
           </div>
@@ -64,15 +100,19 @@ export default function MatchDetailModal({ match, onClose, onVerify, onReject })
             </h3>
             <div className="space-y-3 text-sm">
               <div className="flex items-center gap-2">
-                <MapPin className="w-4 h-4 text-gray-400" />
-                <span>{match.sighting?.location || match.location || 'N/A'}</span>
+                <MapPin className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                <span>{formatLocation(sighting.location || match.location)}</span>
               </div>
               <div className="flex items-center gap-2">
-                <Calendar className="w-4 h-4 text-gray-400" />
-                <span>{formatDateTime(match.sighting?.createdAt || match.createdAt)}</span>
+                <Calendar className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                <span>
+                  {formatDateTime(
+                    sighting.sightingTime || sighting.createdAt || match.createdAt
+                  )}
+                </span>
               </div>
-              {match.sighting?.description && (
-                <p className="text-gray-600">{match.sighting.description}</p>
+              {sighting.description && (
+                <p className="text-gray-600">{sighting.description}</p>
               )}
             </div>
           </div>
@@ -82,10 +122,10 @@ export default function MatchDetailModal({ match, onClose, onVerify, onReject })
             <div>
               <p className="text-xs text-gray-500 mb-2">Missing Person Photo</p>
               <div className="aspect-square bg-gray-100 rounded-lg overflow-hidden">
-                {match.missingPerson?.photos?.[0] ? (
+                {missingPhotoUrl ? (
                   <img
-                    src={getImageUrl(match.missingPerson.photos[0])}
-                    alt="Missing person"
+                    src={missingPhotoUrl}
+                    alt={missingName}
                     className="w-full h-full object-cover"
                   />
                 ) : (
@@ -98,9 +138,9 @@ export default function MatchDetailModal({ match, onClose, onVerify, onReject })
             <div>
               <p className="text-xs text-gray-500 mb-2">Sighting Photo</p>
               <div className="aspect-square bg-gray-100 rounded-lg overflow-hidden">
-                {match.sighting?.photo ? (
+                {sightingPhotoUrl ? (
                   <img
-                    src={getImageUrl(match.sighting.photo || match.sighting.image)}
+                    src={sightingPhotoUrl}
                     alt="Sighting"
                     className="w-full h-full object-cover"
                   />
@@ -114,14 +154,28 @@ export default function MatchDetailModal({ match, onClose, onVerify, onReject })
           </div>
 
           {/* Notes */}
-          {match.notes?.length > 0 && (
+          {notes.length > 0 && (
             <div className="card p-4">
               <h3 className="font-semibold text-gray-900 mb-2">Investigation Notes</h3>
-              {match.notes.map((note, i) => (
-                <p key={i} className="text-sm text-gray-600 border-l-2 border-maroon-200 pl-3 py-1">
-                  {note}
-                </p>
-              ))}
+              <div className="space-y-2">
+                {notes.map((item, i) => {
+                  const text = typeof item === 'string' ? item : item.note || item.text || '';
+                  const author = typeof item === 'object' ? item.createdBy?.name : null;
+                  const created = typeof item === 'object' ? item.createdAt : null;
+
+                  return (
+                    <div key={item._id || i} className="text-sm text-gray-600 border-l-2 border-maroon-200 pl-3 py-1">
+                      <p>{text}</p>
+                      {(author || created) && (
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          {author ? `${author} • ` : ''}
+                          {created ? formatDateTime(created) : ''}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>

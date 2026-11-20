@@ -1,10 +1,10 @@
 // src/pages/citizen/MissingPersonDetailPage.jsx
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ArrowLeft, MapPin, Calendar, User, AlertCircle, Edit } from 'lucide-react';
+import { ArrowLeft, MapPin, Calendar, User, AlertCircle, Edit, Phone, Mail } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
 import missingPersonService from '../../services/missingPerson.service';
-import { formatDate, getFullName, getStatusColor, getImageUrl } from '../../utils/helpers';
+import { formatDate, formatLocation, getStatusColor, getImageUrl } from '../../utils/helpers';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
 import ErrorAlert from '../../components/common/ErrorAlert';
 
@@ -31,7 +31,8 @@ export default function MissingPersonDetailPage() {
       const data = response.data || response;
       setPerson(data);
       if (data.photos?.length > 0) {
-        setSelectedPhoto(data.photos[0]);
+        const primary = data.photos.find((p) => p?.isPrimary) || data.photos[0];
+        setSelectedPhoto(primary);
       }
     } catch (err) {
       setError('Failed to load missing person details.');
@@ -61,8 +62,25 @@ export default function MissingPersonDetailPage() {
 
   if (!person) return null;
 
-  const fullName = person.name || 'Unknown';
-  const isCreator = person.createdBy === user?._id || person.createdBy === user?.id;
+  const fullName =
+    person.fullName ||
+    person.name ||
+    [person.firstName, person.lastName].filter(Boolean).join(' ') ||
+    'Unknown';
+
+  const creatorId =
+    typeof person.createdBy === 'object' ? person.createdBy?._id : person.createdBy;
+  const isCreator = Boolean(creatorId && (creatorId === user?._id || creatorId === user?.id));
+
+  const lastSeenText = formatLocation(
+    person.lastSeenLocation || person.lastKnownLocation
+  );
+
+  const matches = person.recentMatches || person.matches || [];
+  const physical = person.physicalDescription || {};
+  const hasPhysicalDetails = Object.values(physical).some(Boolean);
+  const contact = person.contactInfo || {};
+  const hasContactInfo = Boolean(contact.name || contact.phone || contact.email || contact.relationship);
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -104,13 +122,17 @@ export default function MissingPersonDetailPage() {
             <div className="grid grid-cols-4 gap-2">
               {person.photos.map((photo, index) => (
                 <button
-                  key={index}
+                  key={photo._id || index}
                   onClick={() => setSelectedPhoto(photo)}
                   className={`aspect-square rounded-lg overflow-hidden bg-gray-100 border-2 transition-colors ${
                     selectedPhoto === photo ? 'border-maroon-800' : 'border-transparent'
                   }`}
                 >
-                  <img src={getImageUrl(photo)} alt={`${fullName} ${index + 1}`} className="w-full h-full object-cover" />
+                  <img
+                    src={getImageUrl(photo)}
+                    alt={`${fullName} ${index + 1}`}
+                    className="w-full h-full object-cover"
+                  />
                 </button>
               ))}
             </div>
@@ -125,36 +147,46 @@ export default function MissingPersonDetailPage() {
               <div>
                 <h1 className="text-2xl font-bold text-gray-900">{fullName}</h1>
                 <div className="flex items-center gap-3 mt-2 text-sm text-gray-600">
-                  <span>{person.age} years old</span>
+                  {person.age != null && <span>{person.age} years old</span>}
                   {person.gender && <span className="capitalize">{person.gender}</span>}
                 </div>
               </div>
               <span className={`badge text-sm ${getStatusColor(person.status)}`}>
-                {person.status || 'active'}
+                {person.status || 'missing'}
               </span>
             </div>
 
             <div className="space-y-3 text-sm">
               <div className="flex items-center gap-2 text-gray-600">
-                <MapPin className="w-4 h-4 text-maroon-800" />
-                <span>Last seen: {person.lastKnownLocation || 'Unknown'}</span>
+                <MapPin className="w-4 h-4 text-maroon-800 flex-shrink-0" />
+                <span>Last seen: {lastSeenText}</span>
               </div>
+              {person.lastSeenDate && (
+                <div className="flex items-center gap-2 text-gray-600">
+                  <Calendar className="w-4 h-4 text-maroon-800 flex-shrink-0" />
+                  <span>Last seen date: {formatDate(person.lastSeenDate)}</span>
+                </div>
+              )}
               <div className="flex items-center gap-2 text-gray-600">
-                <Calendar className="w-4 h-4 text-maroon-800" />
+                <Calendar className="w-4 h-4 text-maroon-800 flex-shrink-0" />
                 <span>Reported: {formatDate(person.createdAt)}</span>
               </div>
               {person.urgency && (
                 <div className="flex items-center gap-2">
-                  <AlertCircle className={`w-4 h-4 ${
-                    person.urgency === 'critical' || person.urgency === 'high'
-                      ? 'text-red-600'
-                      : 'text-yellow-600'
-                  }`} />
-                  <span className={`capitalize ${
-                    person.urgency === 'critical' || person.urgency === 'high'
-                      ? 'text-red-600 font-medium'
-                      : 'text-yellow-600'
-                  }`}>
+                  <AlertCircle
+                    className={`w-4 h-4 ${
+                      person.urgency === 'critical' || person.urgency === 'high'
+                        ? 'text-red-600'
+                        : 'text-yellow-600'
+                    }`}
+                  />
+                  <span
+                    className={`capitalize ${
+                      person.urgency === 'critical' || person.urgency === 'high'
+                        ? 'text-red-600 font-medium'
+                        : 'text-yellow-600'
+                    }`}
+                  >
                     {person.urgency} urgency
                   </span>
                 </div>
@@ -162,20 +194,94 @@ export default function MissingPersonDetailPage() {
             </div>
           </div>
 
-          {/* Description */}
-          {person.description && (
+          {/* Physical Description */}
+          {hasPhysicalDetails && (
             <div className="card p-6">
-              <h3 className="text-lg font-semibold text-gray-900 mb-3">Description</h3>
-              <p className="text-gray-700 leading-relaxed">{person.description}</p>
+              <h3 className="text-lg font-semibold text-gray-900 mb-3">Physical Description</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                {physical.height && (
+                  <div>
+                    <span className="text-gray-500">Height:</span>
+                    <p className="text-gray-900">{physical.height}</p>
+                  </div>
+                )}
+                {physical.weight && (
+                  <div>
+                    <span className="text-gray-500">Weight:</span>
+                    <p className="text-gray-900">{physical.weight}</p>
+                  </div>
+                )}
+                {physical.hairColor && (
+                  <div>
+                    <span className="text-gray-500">Hair Color:</span>
+                    <p className="text-gray-900">{physical.hairColor}</p>
+                  </div>
+                )}
+                {physical.eyeColor && (
+                  <div>
+                    <span className="text-gray-500">Eye Color:</span>
+                    <p className="text-gray-900">{physical.eyeColor}</p>
+                  </div>
+                )}
+                {physical.clothing && (
+                  <div className="sm:col-span-2">
+                    <span className="text-gray-500">Last Seen Wearing:</span>
+                    <p className="text-gray-900">{physical.clothing}</p>
+                  </div>
+                )}
+                {physical.distinguishingFeatures && (
+                  <div className="sm:col-span-2">
+                    <span className="text-gray-500">Distinguishing Features:</span>
+                    <p className="text-gray-900">{physical.distinguishingFeatures}</p>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
-          {/* Matches (if any) */}
-          {person.matches?.length > 0 && (
+          {/* Description / Additional Notes */}
+          {(person.description || person.additionalInfo) && (
             <div className="card p-6">
-              <h3 className="text-lg font-semibold text-gray-900 mb-4">Potential Matches</h3>
+              <h3 className="text-lg font-semibold text-gray-900 mb-3">Description</h3>
+              <p className="text-gray-700 leading-relaxed">
+                {person.description || person.additionalInfo}
+              </p>
+            </div>
+          )}
+
+          {/* Contact Info */}
+          {hasContactInfo && (
+            <div className="card p-6">
+              <h3 className="text-lg font-semibold text-gray-900 mb-3">Family / Contact Info</h3>
+              <div className="space-y-2 text-sm text-gray-700">
+                {contact.name && (
+                  <p className="font-medium text-gray-900">
+                    {contact.name}
+                    {contact.relationship ? ` (${contact.relationship})` : ''}
+                  </p>
+                )}
+                {contact.phone && (
+                  <p className="flex items-center gap-2">
+                    <Phone className="w-4 h-4 text-maroon-800" />
+                    {contact.phone}
+                  </p>
+                )}
+                {contact.email && (
+                  <p className="flex items-center gap-2">
+                    <Mail className="w-4 h-4 text-maroon-800" />
+                    {contact.email}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Potential Matches */}
+          {matches.length > 0 && (
+            <div className="card p-6">
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">Potential Matches</h3>
               <p className="text-sm text-gray-500">
-                {person.matches.length} potential match(es) found. Administrators are reviewing.
+                {matches.length} potential match(es) found. Administrators are reviewing.
               </p>
             </div>
           )}

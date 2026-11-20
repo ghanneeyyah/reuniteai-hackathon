@@ -1,12 +1,13 @@
 // src/context/SocketContext.jsx
 import { createContext, useEffect, useState, useRef, useCallback } from 'react';
 import { io } from 'socket.io-client';
+import toast from 'react-hot-toast';
 import { useAuth } from '../hooks/useAuth';
 
 export const SocketContext = createContext(null);
 
 export function SocketProvider({ children }) {
-  const { token, isAuthenticated } = useAuth();
+  const { user, token, isAuthenticated } = useAuth();
   const [socket, setSocket] = useState(null);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef(null);
@@ -30,6 +31,19 @@ export function SocketProvider({ children }) {
     newSocket.on('connect', () => {
       console.log('Socket connected:', newSocket.id);
       setConnected(true);
+      const userId = user?._id || user?.id;
+      if (userId) {
+        newSocket.emit('join-user-room', userId);
+      }
+    });
+
+    newSocket.on('notification', (notif) => {
+      if (notif?.title || notif?.message) {
+        toast(`${notif.title}: ${notif.message}`, {
+          icon: '🔔',
+          duration: 5000,
+        });
+      }
     });
 
     newSocket.on('disconnect', () => {
@@ -51,7 +65,7 @@ export function SocketProvider({ children }) {
       setSocket(null);
       setConnected(false);
     };
-  }, [isAuthenticated, token]);
+  }, [isAuthenticated, token, user?._id, user?.id]);
 
   const emit = useCallback((event, data) => {
     if (socketRef.current?.connected) {
@@ -59,13 +73,16 @@ export function SocketProvider({ children }) {
     }
   }, []);
 
-  const subscribe = useCallback((event, callback) => {
-    if (socketRef.current) {
-      socketRef.current.on(event, callback);
-      return () => socketRef.current.off(event, callback);
-    }
-    return () => {};
-  }, []);
+  const subscribe = useCallback(
+    (event, callback) => {
+      if (socket) {
+        socket.on(event, callback);
+        return () => socket.off(event, callback);
+      }
+      return () => {};
+    },
+    [socket]
+  );
 
   const value = {
     socket,

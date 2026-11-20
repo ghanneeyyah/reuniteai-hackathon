@@ -40,9 +40,8 @@ export default function AdminDashboardPage() {
         adminService.getActivityLogs({ limit: 5 }),
       ]);
 
-      // FIX: Backend returns { success, data: { overview: { totalMissing, totalSightings, ... }, trends, recent } }
-      // The original code read statsRes.data which is the whole nested object, not the overview.
-      const overview = statsRes?.data?.overview ?? statsRes?.overview ?? statsRes?.data ?? statsRes ?? {};
+      const overview =
+        statsRes?.data?.overview ?? statsRes?.overview ?? statsRes?.data ?? statsRes ?? {};
       setStats(overview);
 
       setHighConfidenceMatches(matchesRes?.data || matchesRes?.matches || []);
@@ -68,7 +67,6 @@ export default function AdminDashboardPage() {
       value: stats?.totalMissing ?? 0,
       icon: Users,
       color: 'bg-maroon-50 text-maroon-800',
-      // FIX: was incorrectly '/admin/matches' — missing persons have their own page
       link: '/admin/missing-persons',
     },
     {
@@ -80,7 +78,6 @@ export default function AdminDashboardPage() {
     },
     {
       label: 'Total Matches',
-      // FIX: backend returns totalMatches, not verifiedMatches
       value: stats?.totalMatches ?? 0,
       icon: CheckCircle,
       color: 'bg-green-50 text-green-600',
@@ -153,29 +150,48 @@ export default function AdminDashboardPage() {
           </div>
         ) : (
           <div className="space-y-3">
-            {highConfidenceMatches.slice(0, 5).map((match) => (
-              <Link
-                key={match._id || match.id}
-                to="/admin/matches"
-                className="card flex items-center gap-4 hover:border-maroon-300 transition-all"
-              >
-                <div className="w-12 h-12 bg-maroon-50 rounded-lg flex items-center justify-center flex-shrink-0">
-                  <span className="text-maroon-800 font-bold text-lg">
-                    {Math.round(match.confidence || match.matchPercentage || 0)}%
+            {highConfidenceMatches.slice(0, 5).map((match) => {
+              const person =
+                (typeof match.missingPersonId === 'object' && match.missingPersonId) ||
+                match.missingPerson ||
+                {};
+              const personName =
+                person.fullName ||
+                person.name ||
+                [person.firstName, person.lastName].filter(Boolean).join(' ') ||
+                'Unknown Missing Person';
+
+              const rawScore = Number(
+                match.similarityScore ??
+                match.matchPercentage ??
+                (typeof match.confidence === 'number' ? match.confidence : 0)
+              );
+              const score = Number.isFinite(rawScore) ? rawScore : 0;
+
+              return (
+                <Link
+                  key={match._id || match.id}
+                  to="/admin/matches"
+                  className="card flex items-center gap-4 hover:border-maroon-300 transition-all"
+                >
+                  <div className="w-12 h-12 bg-maroon-50 rounded-lg flex items-center justify-center flex-shrink-0">
+                    <span className="text-maroon-800 font-bold text-sm">
+                      {Math.round(score)}%
+                    </span>
+                  </div>
+                  <div className="flex-grow min-w-0">
+                    <p className="font-medium text-gray-900 truncate">{personName}</p>
+                    <p className="text-sm text-gray-500">
+                      Match confidence: {formatMatchPercentage(score)}
+                      {match.createdAt ? ` • ${timeAgo(match.createdAt)}` : ''}
+                    </p>
+                  </div>
+                  <span className="badge-maroon text-xs flex-shrink-0 capitalize">
+                    {match.status || 'pending'}
                   </span>
-                </div>
-                <div className="flex-grow min-w-0">
-                  <p className="font-medium text-gray-900 truncate">
-                    {match.missingPerson?.firstName} {match.missingPerson?.lastName}
-                  </p>
-                  <p className="text-sm text-gray-500">
-                    Match confidence:{' '}
-                    {formatMatchPercentage(match.confidence || match.matchPercentage)}
-                  </p>
-                </div>
-                <span className="badge-maroon text-xs flex-shrink-0">Pending</span>
-              </Link>
-            ))}
+                </Link>
+              );
+            })}
           </div>
         )}
       </div>

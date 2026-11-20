@@ -19,9 +19,12 @@ export default function MapAdminPage() {
   const [stats, setStats] = useState(null);
 
   useEffect(() => {
-    fetchMapData();
-    fetchStats();
+    refreshAll();
   }, []);
+
+  const refreshAll = async () => {
+    await Promise.all([fetchMapData(), fetchStats()]);
+  };
 
   const fetchMapData = async () => {
     setLoading(true);
@@ -49,9 +52,9 @@ export default function MapAdminPage() {
   const handleBatchGeocode = async () => {
     setGeocodingLoading(true);
     try {
-      await mapService.batchGeocode();
-      toast.success('Batch geocoding completed!');
-      fetchMapData();
+      const res = await mapService.batchGeocode();
+      toast.success(res.message || 'Batch geocoding completed!');
+      await refreshAll();
     } catch (err) {
       toast.error(getErrorMessage(err));
     } finally {
@@ -66,6 +69,12 @@ export default function MapAdminPage() {
       </div>
     );
   }
+
+  const totalMissing = stats?.missingPersons?.total ?? stats?.totalMissing ?? 0;
+  const totalSightings = stats?.sightings?.total ?? stats?.totalSightings ?? 0;
+  const geocodedCount =
+    stats?.geocodedCount ??
+    ((stats?.missingPersons?.withCoordinates || 0) + (stats?.sightings?.withCoordinates || 0));
 
   return (
     <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -84,7 +93,7 @@ export default function MapAdminPage() {
             {geocodingLoading ? 'Geocoding...' : 'Batch Geocode'}
           </button>
           <button
-            onClick={fetchMapData}
+            onClick={refreshAll}
             className="btn-secondary flex items-center gap-2 text-sm"
           >
             <RefreshCw className="w-4 h-4" />
@@ -101,21 +110,21 @@ export default function MapAdminPage() {
           <div className="card p-4 flex items-center gap-3">
             <MapPin className="w-5 h-5 text-maroon-800" />
             <div>
-              <p className="text-lg font-bold text-gray-900">{stats.totalMissing || 0}</p>
+              <p className="text-lg font-bold text-gray-900">{totalMissing}</p>
               <p className="text-xs text-gray-500">Missing Persons</p>
             </div>
           </div>
           <div className="card p-4 flex items-center gap-3">
             <Activity className="w-5 h-5 text-blue-600" />
             <div>
-              <p className="text-lg font-bold text-gray-900">{stats.totalSightings || 0}</p>
+              <p className="text-lg font-bold text-gray-900">{totalSightings}</p>
               <p className="text-xs text-gray-500">Sightings</p>
             </div>
           </div>
           <div className="card p-4 flex items-center gap-3">
             <Layers className="w-5 h-5 text-green-600" />
             <div>
-              <p className="text-lg font-bold text-gray-900">{stats.geocodedCount || 0}</p>
+              <p className="text-lg font-bold text-gray-900">{geocodedCount}</p>
               <p className="text-xs text-gray-500">Geocoded</p>
             </div>
           </div>

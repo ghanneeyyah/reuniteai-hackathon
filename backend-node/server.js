@@ -26,6 +26,10 @@ const authRoutes = require('./src/routes/auth.routes');
 const adminRoutes = require('./src/routes/admin.routes');
 const mapRoutes = require('./src/routes/map.routes');
 
+const jwt = require('jsonwebtoken');
+const notificationRoutes = require('./src/routes/notification.routes');
+const notificationService = require('./src/services/notification.service');
+
 const allowedOrigins = [
     process.env.FRONTEND_URL,
     'http://localhost:5173',
@@ -84,8 +88,31 @@ mongoose.connect(process.env.MONGODB_URI, {
 });
 
 // Socket.io connection
+notificationService.setIO(io);
+
 io.on('connection', (socket) => {
     console.log('📡 New client connected:', socket.id);
+
+    // Auto-join user room from JWT token sent by SocketContext
+    const token = socket.handshake.auth?.token;
+    if (token && process.env.JWT_SECRET) {
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            const userId = decoded.id || decoded.userId || decoded._id;
+            if (userId) {
+                socket.join(`user:${userId}`);
+            }
+            if (decoded.role === 'admin') {
+                socket.join('admins');
+            }
+        } catch (err) {
+            console.warn('Socket auth token invalid:', err.message);
+        }
+    }
+
+    socket.on('join-user-room', (userId) => {
+        if (userId) socket.join(`user:${userId}`);
+    });
 
     socket.on('disconnect', () => {
         console.log('📡 Client disconnected:', socket.id);
@@ -110,6 +137,7 @@ app.use('/api/sighting', sightingRoutes);
 app.use('/api/matches', matchRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/map', mapRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // 404 handler
 app.use((req, res) => {
